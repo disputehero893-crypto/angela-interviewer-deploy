@@ -5,6 +5,10 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import {
+  mountRecordingRoutes,
+  recordingConfigured,
+} from "./recording.js";
 
 dotenv.config();
 
@@ -83,6 +87,8 @@ app.get("/api/health", (_req, res) => {
     heygenReady: heygenConfigured(),
     heygenAvatarIdSet: Boolean(LIVEAVATAR_AVATAR_ID),
     heygenKeySet: Boolean(LIVEAVATAR_API_KEY),
+    recordingReady: recordingConfigured(),
+    supabaseUrlSet: Boolean((process.env.SUPABASE_URL || "").trim()),
   });
 });
 
@@ -277,6 +283,8 @@ app.get("/api/reports/:id", (req, res) => {
   if (!report) return res.status(404).json({ error: "not_found" });
   res.json(report);
 });
+
+mountRecordingRoutes(app);
 
 const dist = path.join(root, "dist");
 if (fs.existsSync(dist)) {

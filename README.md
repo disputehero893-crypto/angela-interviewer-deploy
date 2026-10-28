@@ -49,6 +49,18 @@ Dev (Vite + API): `npm run dev` (API on :4173, Vite on :5173).
 | `ELEVENLABS_API_KEY` | Signed URL minting (optional if agent auth is off) |
 | `ADMIN_KEY` | Read saved reports |
 
+
+## Interview recording (optional)
+
+After consent + **Start interview**, the browser asks for camera + mic, shows a self-view, and records the candidate plus Angela’s avatar side with `MediaRecorder`. If the camera is denied, the interview continues (audio-only / no candidate video) and the row is marked `camera_denied`.
+
+Videos land in the free Supabase project’s private `angela-interviews` bucket (schema `angela.interviews`). Staff review is at **`/review`** (same access code). Without storage env vars, live interviews still work; recording APIs return `storage_not_configured`.
+
+| Var | Purpose |
+|-----|---------|
+| `SUPABASE_URL` | Project URL (non-secret) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only; paste in Render yourself — never commit |
+
 ## Report storage
 
 JSON file at `data/reports.json` (private on host disk). Supabase project deferred — org already has 2 projects; third may bill.

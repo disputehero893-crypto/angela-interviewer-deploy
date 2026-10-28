@@ -8,6 +8,13 @@ import {
 } from "@heygen/liveavatar-web-sdk";
 import { createAudioTap } from "./audioTap";
 import { ROCKETBOX_MORPH_TARGETS } from "./morphTargets";
+import {
+  requestCandidateMedia,
+  startRecorder,
+  buildAngelaStream,
+  saveInterviewRecording,
+  type SideRecorder,
+} from "./recording";
 import "./App.css";
 
 type Step = "gate" | "consent" | "live" | "done";
@@ -36,15 +43,28 @@ export default function App() {
   const [candidateName, setCandidateName] = useState("");
   const [position, setPosition] = useState("Behavioral Health Nurse");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [cameraDenied, setCameraDenied] = useState(false);
+  const [hasSelfView, setHasSelfView] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingNote, setRecordingNote] = useState("");
+  const [interviewRecordId, setInterviewRecordId] = useState<string | null>(
+    null,
+  );
 
   const convRef = useRef<AwaitableConversation | null>(null);
   const heygenRef = useRef<LiveAvatarSession | null>(null);
   const avatarRef = useRef<TalkingAvatar | null>(null);
   const avatarMountRef = useRef<HTMLDivElement | null>(null);
+  const avatarFrameRef = useRef<HTMLDivElement | null>(null);
   const heygenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const selfViewRef = useRef<HTMLVideoElement | null>(null);
   const portraitAudioRef = useRef<HTMLAudioElement | null>(null);
   const analyserCleanupRef = useRef<(() => void) | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const candidateStreamRef = useRef<MediaStream | null>(null);
+  const candidateRecorderRef = useRef<SideRecorder | null>(null);
+  const angelaRecorderRef = useRef<SideRecorder | null>(null);
+  const cameraDeniedRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -52,6 +72,15 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (step !== "live") return;
+    const stream = candidateStreamRef.current;
+    if (stream && selfViewRef.current) {
+      selfViewRef.current.srcObject = stream;
+      void selfViewRef.current.play().catch(() => {});
+    }
+  }, [step, hasSelfView]);
 
   const unlock = async () => {
     setGateError("");
@@ -130,6 +159,74 @@ export default function App() {
     await avatar.ready;
     await avatar.attachStream(stream);
     avatarRef.current = avatar;
+  };
+
+  const stopSideRecorders = async () => {
+    const cand = candidateRecorderRef.current;
+    const ang = angelaRecorderRef.current;
+    candidateRecorderRef.current = null;
+    angelaRecorderRef.current = null;
+    setRecording(false);
+    const candidateBlob = cand ? await cand.stop() : null;
+    const angelaBlob = ang ? await ang.stop() : null;
+    return { candidateBlob, angelaBlob };
+  };
+
+  const startSideRecorders = () => {
+    try {
+      if (candidateStreamRef.current && !candidateRecorderRef.current) {
+        candidateRecorderRef.current = startRecorder(
+          candidateStreamRef.current,
+          "candidate",
+        );
+      }
+      const angelaStream = buildAngelaStream({
+        videoEl: heygenVideoRef.current,
+        frameEl: avatarFrameRef.current,
+        agentStream: streamRef.current,
+      });
+      if (angelaStream && !angelaRecorderRef.current) {
+        angelaRecorderRef.current = startRecorder(angelaStream, "angela");
+      }
+      const active = Boolean(
+        candidateRecorderRef.current || angelaRecorderRef.current,
+      );
+      setRecording(active);
+      if (active) {
+        setRecordingNote(
+          cameraDeniedRef.current
+            ? "Recording (camera off — audio/avatar only)"
+            : "Recording both sides",
+        );
+      }
+    } catch (e) {
+      console.warn("recorder start failed", e);
+    }
+  };
+
+  const prepareCandidateCamera = async () => {
+    const cam = await requestCandidateMedia();
+    cameraDeniedRef.current = cam.cameraDenied;
+    setCameraDenied(cam.cameraDenied);
+    candidateStreamRef.current = cam.stream;
+    setHasSelfView(Boolean(cam.stream && cam.stream.getVideoTracks().length));
+    if (cam.stream) {
+      // Attach after paint so the video element exists in live step
+      requestAnimationFrame(() => {
+        if (selfViewRef.current) {
+          selfViewRef.current.srcObject = cam.stream;
+          void selfViewRef.current.play().catch(() => {});
+        }
+      });
+    }
+    if (cam.cameraDenied) {
+      setRecordingNote(
+        cam.stream
+          ? "Camera denied — continuing with microphone only"
+          : "Camera/mic unavailable — interview continues without candidate recording",
+      );
+    }
+    return cam;
   };
 
   const startHeygenInterview = async () => {
@@ -220,6 +317,11 @@ export default function App() {
     }
     if (data.sessionId) setConversationId(String(data.sessionId));
     setStatus("Connected — Angela is with you (HeyGen LiveAvatar)");
+    // Wait for LiveAvatar media, then start recorders
+    window.setTimeout(() => startSideRecorders(), 1500);
+    window.setTimeout(() => {
+      if (!angelaRecorderRef.current) startSideRecorders();
+    }, 4000);
   };
 
   const startOssInterview = async () => {
@@ -282,11 +384,14 @@ export default function App() {
       console.warn("Avatar stream tap failed; voice-only fallback", streamErr);
       setStatus("Live (voice — avatar stream unavailable)");
     }
+    window.setTimeout(() => startSideRecorders(), 500);
   };
 
   const startInterview = async () => {
     setError("");
+    setInterviewRecordId(null);
     try {
+      await prepareCandidateCamera();
       if (avatarProvider === "heygen") {
         await startHeygenInterview();
       } else {
@@ -316,6 +421,8 @@ export default function App() {
 
   const endSession = useCallback(
     async (save: boolean) => {
+      const { candidateBlob, angelaBlob } = await stopSideRecorders();
+
       analyserCleanupRef.current?.();
       try {
         avatarRef.current?.detachStream();
@@ -325,6 +432,13 @@ export default function App() {
       }
       avatarRef.current = null;
       streamRef.current = null;
+
+      const candStream = candidateStreamRef.current;
+      candidateStreamRef.current = null;
+      if (candStream) {
+        candStream.getTracks().forEach((t) => t.stop());
+      }
+      if (selfViewRef.current) selfViewRef.current.srcObject = null;
 
       const heygen = heygenRef.current;
       heygenRef.current = null;
@@ -347,6 +461,32 @@ export default function App() {
       }
 
       if (save) {
+        try {
+          const rec = await saveInterviewRecording({
+            candidateName: candidateName || "Fictional Candidate",
+            position,
+            conversationId,
+            cameraDenied: cameraDeniedRef.current,
+            avatarProvider,
+            transcript,
+            candidateBlob,
+            angelaBlob,
+            candidateRecorderStarted: Boolean(candidateBlob),
+          });
+          if (rec.id) setInterviewRecordId(rec.id);
+          if (rec.skipped) {
+            setRecordingNote(
+              "Recording skipped — storage not configured (live interview still saved locally).",
+            );
+          } else if (rec.error) {
+            setRecordingNote(`Recording save issue: ${rec.error}`);
+          } else if (rec.id) {
+            setRecordingNote("Both sides saved for review.");
+          }
+        } catch (e) {
+          console.warn("recording save failed", e);
+        }
+
         try {
           await fetch("/api/reports", {
             method: "POST",
@@ -487,7 +627,10 @@ export default function App() {
       {step === "live" && (
         <section className="live">
           <div className="stage">
-            <div className={`avatar-frame ${speaking ? "speaking" : ""}`}>
+            <div
+              ref={avatarFrameRef}
+              className={`avatar-frame ${speaking ? "speaking" : ""}`}
+            >
               {avatarProvider === "heygen" ? (
                 <video
                   ref={heygenVideoRef}
@@ -504,9 +647,30 @@ export default function App() {
                 <strong>Angela</strong>
                 <span>{speaking ? "Speaking" : "Listening"}</span>
               </div>
+              {hasSelfView && (
+                <div className="self-view-wrap">
+                  <video
+                    ref={selfViewRef}
+                    className="self-view"
+                    autoPlay
+                    muted
+                    playsInline
+                  />
+                  <span className="self-view-label">You</span>
+                </div>
+              )}
             </div>
             <div className="controls">
               <p className="status">{status}</p>
+              {recording && <p className="rec-pill">{recordingNote || "Recording"}</p>}
+              {!recording && recordingNote && (
+                <p className="muted">{recordingNote}</p>
+              )}
+              {cameraDenied && (
+                <p className="muted">
+                  Camera not available — continuing without candidate video.
+                </p>
+              )}
               {avatarProvider !== "heygen" && (
                 <div className="mode-toggle">
                   <button
@@ -560,6 +724,13 @@ export default function App() {
             review. Angela never auto-rejects or ranks candidates — a human
             follows up.
           </p>
+          {recordingNote && <p className="muted">{recordingNote}</p>}
+          {interviewRecordId && (
+            <p className="muted">
+              Recording id: {interviewRecordId} · staff can open{" "}
+              <a href="/review">/review</a>
+            </p>
+          )}
           {conversationId && (
             <p className="muted">Conversation id: {conversationId}</p>
           )}
