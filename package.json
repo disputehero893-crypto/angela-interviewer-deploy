@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@elevenlabs/client": "^1.32.0",
+    "@heygen/liveavatar-web-sdk": "^0.0.19",
     "@interviewflowai/talking-avatar": "^0.2.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",

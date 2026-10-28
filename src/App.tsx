@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Conversation } from "@elevenlabs/client";
 import { TalkingAvatar } from "@interviewflowai/talking-avatar";
+import {
+  ElevenLabsAgentSession,
+  AgentEventsEnum,
+  type LiveAvatarSession,
+} from "@heygen/liveavatar-web-sdk";
 import { createAudioTap } from "./audioTap";
 import { ROCKETBOX_MORPH_TARGETS } from "./morphTargets";
 import "./App.css";
 
 type Step = "gate" | "consent" | "live" | "done";
 type AvatarMode = "portrait" | "3d";
+type AvatarProvider = "talking-avatar-oss" | "heygen";
 
 type TranscriptLine = { role: "agent" | "user"; text: string; at: string };
 
@@ -19,6 +25,8 @@ export default function App() {
   const [code, setCode] = useState("");
   const [gateError, setGateError] = useState("");
   const [agentId, setAgentId] = useState("");
+  const [avatarProvider, setAvatarProvider] =
+    useState<AvatarProvider>("talking-avatar-oss");
   const [consentChecked, setConsentChecked] = useState(false);
   const [status, setStatus] = useState("Idle");
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
@@ -30,8 +38,10 @@ export default function App() {
   const [conversationId, setConversationId] = useState<string | null>(null);
 
   const convRef = useRef<AwaitableConversation | null>(null);
+  const heygenRef = useRef<LiveAvatarSession | null>(null);
   const avatarRef = useRef<TalkingAvatar | null>(null);
   const avatarMountRef = useRef<HTMLDivElement | null>(null);
+  const heygenVideoRef = useRef<HTMLVideoElement | null>(null);
   const portraitAudioRef = useRef<HTMLAudioElement | null>(null);
   const analyserCleanupRef = useRef<(() => void) | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -57,6 +67,9 @@ export default function App() {
         return;
       }
       setAgentId(data.agentId);
+      if (data.avatarProvider === "heygen" || data.avatarProvider === "talking-avatar-oss") {
+        setAvatarProvider(data.avatarProvider);
+      }
       setStep("consent");
     } catch (e) {
       setGateError(String((e as Error).message || e));
@@ -76,7 +89,6 @@ export default function App() {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 256;
     source.connect(analyser);
-    // Also connect to destination so candidate hears Angela in portrait mode
     source.connect(ctx.destination);
 
     const data = new Uint8Array(analyser.frequencyBinCount);
@@ -120,66 +132,165 @@ export default function App() {
     avatarRef.current = avatar;
   };
 
-  const startInterview = async () => {
+  const startHeygenInterview = async () => {
+    setError("");
+    setStatus("Connecting LiveAvatar…");
+    setTranscript([]);
+    const r = await fetch("/api/avatar/session", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok || !data.sessionToken) {
+      throw new Error(
+        data.error || data.hint || "Failed to mint LiveAvatar session",
+      );
+    }
+
+    const session = new ElevenLabsAgentSession(data.sessionToken, {
+      autoKeepAlive: true,
+    });
+    heygenRef.current = session;
+
+    session.on(AgentEventsEnum.AVATAR_SPEAK_STARTED as never, () => {
+      setSpeaking(true);
+    });
+    session.on(AgentEventsEnum.AVATAR_SPEAK_ENDED as never, () => {
+      setSpeaking(false);
+    });
+    session.on(AgentEventsEnum.AVATAR_TRANSCRIPTION as never, (evt: unknown) => {
+      const text = (evt as { text?: string })?.text;
+      if (!text) return;
+      setTranscript((t) => [
+        ...t,
+        { role: "agent", text, at: new Date().toISOString() },
+      ]);
+    });
+    session.on(AgentEventsEnum.USER_TRANSCRIPTION as never, (evt: unknown) => {
+      const text =
+        (evt as { text?: string; data?: { text?: string } })?.text ||
+        (evt as { data?: { text?: string } })?.data?.text;
+      if (!text) return;
+      setTranscript((t) => [
+        ...t,
+        { role: "user", text, at: new Date().toISOString() },
+      ]);
+    });
+    session.on(
+      AgentEventsEnum.ELEVENLABS_AGENT_EVENT as never,
+      (evt: unknown) => {
+        const e = evt as {
+          elevenlabs_event_type?: string;
+          data?: { agent_response?: string; user_transcription?: string; text?: string };
+        };
+        if (e.elevenlabs_event_type === "agent_response" && e.data) {
+          const text =
+            e.data.agent_response ||
+            (e.data as { text?: string }).text ||
+            "";
+          if (text) {
+            setTranscript((t) => [
+              ...t,
+              { role: "agent", text, at: new Date().toISOString() },
+            ]);
+          }
+        }
+        if (e.elevenlabs_event_type === "user_transcript" && e.data) {
+          const text =
+            (e.data as { user_transcription?: string; text?: string })
+              .user_transcription ||
+            (e.data as { text?: string }).text ||
+            "";
+          if (text) {
+            setTranscript((t) => [
+              ...t,
+              { role: "user", text, at: new Date().toISOString() },
+            ]);
+          }
+        }
+      },
+    );
+
+    setStep("live");
+    setStatus("Starting LiveAvatar…");
+    // Wait one frame so the <video> mounts before attach()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await session.start();
+    if (heygenVideoRef.current) {
+      session.attach(heygenVideoRef.current);
+    } else {
+      console.warn("HeyGen video element missing after mount");
+    }
+    if (data.sessionId) setConversationId(String(data.sessionId));
+    setStatus("Connected — Angela is with you (HeyGen LiveAvatar)");
+  };
+
+  const startOssInterview = async () => {
     setError("");
     setStatus("Connecting…");
     setTranscript([]);
+    const tap = createAudioTap();
+    const sessionCfg = await fetch("/api/signed-url").then((r) => r.json());
+
+    const sessionOptions: Record<string, unknown> = {
+      onConnect: () => setStatus("Connected — Angela is with you"),
+      onDisconnect: () => setStatus("Disconnected"),
+      onError: (err: Error) => {
+        console.error(err);
+        setError(err?.message || "Conversation error");
+      },
+      onModeChange: (m: { mode?: string }) => {
+        if (m?.mode === "speaking") setSpeaking(true);
+        if (m?.mode === "listening") setSpeaking(false);
+      },
+      onMessage: (msg: { source?: string; message?: string }) => {
+        if (!msg?.message) return;
+        const role = msg.source === "user" ? "user" : "agent";
+        setTranscript((t) => [
+          ...t,
+          { role, text: msg.message!, at: new Date().toISOString() },
+        ]);
+      },
+    };
+
+    if (sessionCfg.mode === "signed" && sessionCfg.signedUrl) {
+      sessionOptions.signedUrl = sessionCfg.signedUrl;
+    } else {
+      sessionOptions.agentId = sessionCfg.agentId || agentId;
+    }
+
+    const conv = await Conversation.startSession(
+      sessionOptions as Parameters<typeof Conversation.startSession>[0],
+    );
+    convRef.current = conv as AwaitableConversation;
     try {
-      const tap = createAudioTap();
-      const sessionCfg = await fetch("/api/signed-url").then((r) => r.json());
+      const id = (conv as { getId?: () => string }).getId?.();
+      if (id) setConversationId(id);
+    } catch {
+      /* optional */
+    }
 
-      const sessionOptions: Record<string, unknown> = {
-        onConnect: () => setStatus("Connected — Angela is with you"),
-        onDisconnect: () => setStatus("Disconnected"),
-        onError: (err: Error) => {
-          console.error(err);
-          setError(err?.message || "Conversation error");
-        },
-        onModeChange: (m: { mode?: string }) => {
-          if (m?.mode === "speaking") setSpeaking(true);
-          if (m?.mode === "listening") setSpeaking(false);
-        },
-        onMessage: (msg: { source?: string; message?: string }) => {
-          if (!msg?.message) return;
-          const role = msg.source === "user" ? "user" : "agent";
-          setTranscript((t) => [
-            ...t,
-            { role, text: msg.message!, at: new Date().toISOString() },
-          ]);
-        },
-      };
+    setStep("live");
+    setStatus("Live");
 
-      if (sessionCfg.mode === "signed" && sessionCfg.signedUrl) {
-        sessionOptions.signedUrl = sessionCfg.signedUrl;
+    try {
+      const stream = await tap.waitForStream();
+      streamRef.current = stream;
+      if (avatarMode === "3d") {
+        await attach3dAvatar(stream);
       } else {
-        sessionOptions.agentId = sessionCfg.agentId || agentId;
+        attachPortraitAnalyser(stream);
       }
+    } catch (streamErr) {
+      console.warn("Avatar stream tap failed; voice-only fallback", streamErr);
+      setStatus("Live (voice — avatar stream unavailable)");
+    }
+  };
 
-      const conv = await Conversation.startSession(
-        sessionOptions as Parameters<typeof Conversation.startSession>[0],
-      );
-      convRef.current = conv as AwaitableConversation;
-      try {
-        const id = (conv as { getId?: () => string }).getId?.();
-        if (id) setConversationId(id);
-      } catch {
-        /* optional */
-      }
-
-      setStep("live");
-      setStatus("Live");
-
-      try {
-        const stream = await tap.waitForStream();
-        streamRef.current = stream;
-        if (avatarMode === "3d") {
-          await attach3dAvatar(stream);
-        } else {
-          attachPortraitAnalyser(stream);
-        }
-      } catch (streamErr) {
-        console.warn("Avatar stream tap failed; voice-only fallback", streamErr);
-        setStatus("Live (voice — avatar stream unavailable)");
+  const startInterview = async () => {
+    setError("");
+    try {
+      if (avatarProvider === "heygen") {
+        await startHeygenInterview();
+      } else {
+        await startOssInterview();
       }
     } catch (e) {
       setError(String((e as Error).message || e));
@@ -188,6 +299,7 @@ export default function App() {
   };
 
   const switchAvatarMode = async (mode: AvatarMode) => {
+    if (avatarProvider === "heygen") return;
     setAvatarMode(mode);
     const stream = streamRef.current;
     if (!stream || step !== "live") return;
@@ -213,6 +325,16 @@ export default function App() {
       }
       avatarRef.current = null;
       streamRef.current = null;
+
+      const heygen = heygenRef.current;
+      heygenRef.current = null;
+      if (heygen) {
+        try {
+          await heygen.stop();
+        } catch {
+          /* ignore */
+        }
+      }
 
       const conv = convRef.current;
       convRef.current = null;
@@ -247,6 +369,7 @@ export default function App() {
               notes: "Fictional test data only. Never auto-reject, rank, score, or hire. Human review only.",
               fictional: true,
               mode: "test",
+              avatarProvider,
             }),
           });
         } catch (e) {
@@ -256,7 +379,7 @@ export default function App() {
         setStatus("Interview ended");
       }
     },
-    [candidateName, position, conversationId, transcript],
+    [candidateName, position, conversationId, transcript, avatarProvider],
   );
 
   return (
@@ -321,6 +444,12 @@ export default function App() {
                 </li>
                 <li>You may stop at any time.</li>
               </ul>
+              <p className="muted">
+                Avatar:{" "}
+                {avatarProvider === "heygen"
+                  ? "HeyGen LiveAvatar (Interactive)"
+                  : "Talking Avatar OSS"}
+              </p>
               <label className="check">
                 <input
                   type="checkbox"
@@ -359,12 +488,15 @@ export default function App() {
         <section className="live">
           <div className="stage">
             <div className={`avatar-frame ${speaking ? "speaking" : ""}`}>
-              {avatarMode === "portrait" ? (
-                <img
-                  src={ANGELA_FACE}
-                  alt="Angela"
-                  className="portrait"
+              {avatarProvider === "heygen" ? (
+                <video
+                  ref={heygenVideoRef}
+                  className="heygen-video"
+                  autoPlay
+                  playsInline
                 />
+              ) : avatarMode === "portrait" ? (
+                <img src={ANGELA_FACE} alt="Angela" className="portrait" />
               ) : (
                 <div ref={avatarMountRef} className="avatar-3d" />
               )}
@@ -375,22 +507,24 @@ export default function App() {
             </div>
             <div className="controls">
               <p className="status">{status}</p>
-              <div className="mode-toggle">
-                <button
-                  type="button"
-                  className={avatarMode === "portrait" ? "active" : ""}
-                  onClick={() => void switchAvatarMode("portrait")}
-                >
-                  Angela look (photoreal still)
-                </button>
-                <button
-                  type="button"
-                  className={avatarMode === "3d" ? "active" : ""}
-                  onClick={() => void switchAvatarMode("3d")}
-                >
-                  3D lip-sync (OSS)
-                </button>
-              </div>
+              {avatarProvider !== "heygen" && (
+                <div className="mode-toggle">
+                  <button
+                    type="button"
+                    className={avatarMode === "portrait" ? "active" : ""}
+                    onClick={() => void switchAvatarMode("portrait")}
+                  >
+                    Angela look (photoreal still)
+                  </button>
+                  <button
+                    type="button"
+                    className={avatarMode === "3d" ? "active" : ""}
+                    onClick={() => void switchAvatarMode("3d")}
+                  >
+                    3D lip-sync (OSS)
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className="danger"
@@ -436,8 +570,11 @@ export default function App() {
       )}
 
       <footer>
-        CRS Behavioral Health · Angela interviewer · Talking Avatar OSS +
-        ElevenLabs · No Indeed integration in this build
+        CRS Behavioral Health · Angela interviewer ·{" "}
+        {avatarProvider === "heygen"
+          ? "HeyGen LiveAvatar + ElevenLabs"
+          : "Talking Avatar OSS + ElevenLabs"}{" "}
+        · No Indeed integration in this build
       </footer>
     </div>
   );
