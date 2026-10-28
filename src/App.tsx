@@ -235,9 +235,18 @@ export default function App() {
               conversationId,
               transcript,
               summary:
-                "Test-mode interview saved locally. Full ElevenLabs analysis appears on the agent conversation after call end.",
+                "Test-mode interview saved locally. Full ElevenLabs analysis (data collection + evaluation criteria) appears on the agent conversation after call end. This draft never ranks, scores, rejects, or hires.",
               consentGiven: true,
-              notes: "Fictional test data only. Never auto-reject or rank.",
+              keyResponses: {
+                note: "See ElevenLabs conversation analysis fields: licenses_mentioned, experience_summary, crisis_deescalation_notes, meds_safety_notes, teamwork_availability, candidate_questions.",
+              },
+              verificationNeeded: [],
+              humanFollowups: [
+                "Human recruiter should review the ElevenLabs transcript and data-collection fields before any next step.",
+              ],
+              notes: "Fictional test data only. Never auto-reject, rank, score, or hire. Human review only.",
+              fictional: true,
+              mode: "test",
             }),
           });
         } catch (e) {
