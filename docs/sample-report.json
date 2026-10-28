@@ -1,0 +1,27 @@
+{
+  "id": "sample-fictional-001",
+  "createdAt": "2026-10-28T16:00:00-05:00",
+  "candidateName": "Jordan Lee (FICTIONAL)",
+  "position": "Behavioral Health Nurse",
+  "conversationId": "conv_sample_test_only",
+  "consentGiven": true,
+  "summary": "Fictional test candidate completed a consent-gated spoken interview covering RN license (IL compact), four years psych nursing, a de-escalation example on an inpatient unit, familiarity with common psychotropics, safety checks, teamwork with psychiatry/social work, and evening/weekend availability. No hire/reject decision was made.",
+  "keyResponses": {
+    "licenses": "States RN, Illinois compact (unverified — fictional).",
+    "experience": "Describes ~4 years inpatient behavioral health.",
+    "crisis": "Example of verbal de-escalation with agitated patient; called for support when needed.",
+    "meds_safety": "Comfortable with med pass and Q15 safety rounds.",
+    "teamwork_availability": "Works with interdisciplinary team; open to evenings/weekends."
+  },
+  "verificationNeeded": [
+    "Confirm RN license number and compact status with state board (when real candidate).",
+    "Verify prior employer dates if proceeding."
+  ],
+  "humanFollowups": [
+    "Ask recruiter to walk through CRS unit expectations and shift differentials.",
+    "Clarify preferred start date."
+  ],
+  "notes": "Never auto-reject, rank, score, or hire. Human review only. Fictional data.",
+  "fictional": true,
+  "mode": "test"
+}

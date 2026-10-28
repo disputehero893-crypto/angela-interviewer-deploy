@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: angela-interviewer
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: ACCESS_CODE
+        sync: false
+      - key: ELEVENLABS_AGENT_ID
+        value: agent_9801m624gaj7enj9hj7zd11bqya5
+      - key: ADMIN_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: "22"

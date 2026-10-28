@@ -1,0 +1,7 @@
+node_modules
+dist
+.env
+data/reports.json
+.venv
+*.log
+.DS_Store

@@ -1,0 +1,440 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Conversation } from "@elevenlabs/client";
+import { TalkingAvatar } from "@interviewflowai/talking-avatar";
+import { createAudioTap } from "./audioTap";
+import { ROCKETBOX_MORPH_TARGETS } from "./morphTargets";
+import "./App.css";
+
+type Step = "gate" | "consent" | "live" | "done";
+type AvatarMode = "portrait" | "3d";
+
+type TranscriptLine = { role: "agent" | "user"; text: string; at: string };
+
+const ANGELA_FACE = "/avatar/angela-face.webp";
+const ANGELA_LOOK = "/avatar/angela-look.jpg";
+const ANGELA_GLB = "/avatar/angela.glb";
+
+export default function App() {
+  const [step, setStep] = useState<Step>("gate");
+  const [code, setCode] = useState("");
+  const [gateError, setGateError] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [status, setStatus] = useState("Idle");
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [speaking, setSpeaking] = useState(false);
+  const [avatarMode, setAvatarMode] = useState<AvatarMode>("portrait");
+  const [error, setError] = useState("");
+  const [candidateName, setCandidateName] = useState("");
+  const [position, setPosition] = useState("Behavioral Health Nurse");
+  const [conversationId, setConversationId] = useState<string | null>(null);
+
+  const convRef = useRef<AwaitableConversation | null>(null);
+  const avatarRef = useRef<TalkingAvatar | null>(null);
+  const avatarMountRef = useRef<HTMLDivElement | null>(null);
+  const portraitAudioRef = useRef<HTMLAudioElement | null>(null);
+  const analyserCleanupRef = useRef<(() => void) | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    return () => {
+      void endSession(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const unlock = async () => {
+    setGateError("");
+    try {
+      const r = await fetch("/api/access", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        setGateError(data.error || "Invalid access code");
+        return;
+      }
+      setAgentId(data.agentId);
+      setStep("consent");
+    } catch (e) {
+      setGateError(String((e as Error).message || e));
+    }
+  };
+
+  const attachPortraitAnalyser = (stream: MediaStream) => {
+    analyserCleanupRef.current?.();
+    const audio = new Audio();
+    audio.srcObject = stream;
+    audio.autoplay = true;
+    void audio.play().catch(() => {});
+    portraitAudioRef.current = audio;
+
+    const ctx = new AudioContext();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    // Also connect to destination so candidate hears Angela in portrait mode
+    source.connect(ctx.destination);
+
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    let raf = 0;
+    const tick = () => {
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      setSpeaking(avg > 18);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    analyserCleanupRef.current = () => {
+      cancelAnimationFrame(raf);
+      try {
+        source.disconnect();
+        analyser.disconnect();
+        void ctx.close();
+      } catch {
+        /* ignore */
+      }
+      audio.pause();
+      audio.srcObject = null;
+      portraitAudioRef.current = null;
+      setSpeaking(false);
+    };
+  };
+
+  const attach3dAvatar = async (stream: MediaStream) => {
+    if (!avatarMountRef.current) return;
+    avatarRef.current?.dispose();
+    const avatar = new TalkingAvatar({
+      container: avatarMountRef.current,
+      avatarUrl: ANGELA_GLB,
+      morphTargets: ROCKETBOX_MORPH_TARGETS,
+      streamDelayMs: 120,
+      onError: (err) => console.warn("TalkingAvatar", err),
+    });
+    await avatar.ready;
+    await avatar.attachStream(stream);
+    avatarRef.current = avatar;
+  };
+
+  const startInterview = async () => {
+    setError("");
+    setStatus("Connecting…");
+    setTranscript([]);
+    try {
+      const tap = createAudioTap();
+      const sessionCfg = await fetch("/api/signed-url").then((r) => r.json());
+
+      const sessionOptions: Record<string, unknown> = {
+        onConnect: () => setStatus("Connected — Angela is with you"),
+        onDisconnect: () => setStatus("Disconnected"),
+        onError: (err: Error) => {
+          console.error(err);
+          setError(err?.message || "Conversation error");
+        },
+        onModeChange: (m: { mode?: string }) => {
+          if (m?.mode === "speaking") setSpeaking(true);
+          if (m?.mode === "listening") setSpeaking(false);
+        },
+        onMessage: (msg: { source?: string; message?: string }) => {
+          if (!msg?.message) return;
+          const role = msg.source === "user" ? "user" : "agent";
+          setTranscript((t) => [
+            ...t,
+            { role, text: msg.message!, at: new Date().toISOString() },
+          ]);
+        },
+      };
+
+      if (sessionCfg.mode === "signed" && sessionCfg.signedUrl) {
+        sessionOptions.signedUrl = sessionCfg.signedUrl;
+      } else {
+        sessionOptions.agentId = sessionCfg.agentId || agentId;
+      }
+
+      const conv = await Conversation.startSession(
+        sessionOptions as Parameters<typeof Conversation.startSession>[0],
+      );
+      convRef.current = conv as AwaitableConversation;
+      try {
+        const id = (conv as { getId?: () => string }).getId?.();
+        if (id) setConversationId(id);
+      } catch {
+        /* optional */
+      }
+
+      setStep("live");
+      setStatus("Live");
+
+      try {
+        const stream = await tap.waitForStream();
+        streamRef.current = stream;
+        if (avatarMode === "3d") {
+          await attach3dAvatar(stream);
+        } else {
+          attachPortraitAnalyser(stream);
+        }
+      } catch (streamErr) {
+        console.warn("Avatar stream tap failed; voice-only fallback", streamErr);
+        setStatus("Live (voice — avatar stream unavailable)");
+      }
+    } catch (e) {
+      setError(String((e as Error).message || e));
+      setStatus("Failed to start");
+    }
+  };
+
+  const switchAvatarMode = async (mode: AvatarMode) => {
+    setAvatarMode(mode);
+    const stream = streamRef.current;
+    if (!stream || step !== "live") return;
+    analyserCleanupRef.current?.();
+    avatarRef.current?.detachStream();
+    avatarRef.current?.dispose();
+    avatarRef.current = null;
+    if (mode === "3d") {
+      await attach3dAvatar(stream);
+    } else {
+      attachPortraitAnalyser(stream);
+    }
+  };
+
+  const endSession = useCallback(
+    async (save: boolean) => {
+      analyserCleanupRef.current?.();
+      try {
+        avatarRef.current?.detachStream();
+        avatarRef.current?.dispose();
+      } catch {
+        /* ignore */
+      }
+      avatarRef.current = null;
+      streamRef.current = null;
+
+      const conv = convRef.current;
+      convRef.current = null;
+      if (conv) {
+        try {
+          await conv.endSession();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      if (save) {
+        try {
+          await fetch("/api/reports", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              candidateName: candidateName || "Fictional Candidate",
+              position,
+              conversationId,
+              transcript,
+              summary:
+                "Test-mode interview saved locally. Full ElevenLabs analysis appears on the agent conversation after call end.",
+              consentGiven: true,
+              notes: "Fictional test data only. Never auto-reject or rank.",
+            }),
+          });
+        } catch (e) {
+          console.warn("report save failed", e);
+        }
+        setStep("done");
+        setStatus("Interview ended");
+      }
+    },
+    [candidateName, position, conversationId, transcript],
+  );
+
+  return (
+    <div className="app">
+      <header className="top">
+        <div>
+          <p className="eyebrow">CRS Behavioral Health · Test mode</p>
+          <h1>Angela — AI Video Interviewer</h1>
+        </div>
+        <span className="pill">Unlisted · noindex · fictional data only</span>
+      </header>
+
+      {step === "gate" && (
+        <section className="card gate">
+          <h2>Enter access code</h2>
+          <p>
+            This private test link is not indexed. Use the CRS test access code
+            Derek provided.
+          </p>
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder="Access code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void unlock()}
+          />
+          {gateError && <p className="err">{gateError}</p>}
+          <button type="button" onClick={() => void unlock()}>
+            Continue
+          </button>
+        </section>
+      )}
+
+      {step === "consent" && (
+        <section className="card consent">
+          <div className="consent-grid">
+            <img
+              src={ANGELA_LOOK}
+              alt="Angela, CRS AI interviewer"
+              className="consent-photo"
+            />
+            <div>
+              <h2>Before you begin</h2>
+              <p>
+                You are about to speak with <strong>Angela</strong>, an AI
+                interviewer for CRS Behavioral Health. This is a test-mode
+                session using fictional candidate data.
+              </p>
+              <ul>
+                <li>
+                  Your voice will be <strong>recorded and transcribed</strong> so
+                  a hiring team can review the conversation.
+                </li>
+                <li>
+                  We do <strong>not</strong> use facial recognition or biometric
+                  face analysis (Illinois BIPA / AI Video Interview Act).
+                </li>
+                <li>
+                  Angela will not score, rank, reject, or hire you — a human
+                  reviews the transcript.
+                </li>
+                <li>You may stop at any time.</li>
+              </ul>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={consentChecked}
+                  onChange={(e) => setConsentChecked(e.target.checked)}
+                />
+                I consent to this AI video interview being recorded and
+                transcribed for hiring review only.
+              </label>
+              <div className="row">
+                <input
+                  placeholder="Preferred name (optional)"
+                  value={candidateName}
+                  onChange={(e) => setCandidateName(e.target.value)}
+                />
+                <input
+                  placeholder="Position"
+                  value={position}
+                  onChange={(e) => setPosition(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                disabled={!consentChecked}
+                onClick={() => void startInterview()}
+              >
+                Start interview
+              </button>
+              {error && <p className="err">{error}</p>}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {step === "live" && (
+        <section className="live">
+          <div className="stage">
+            <div className={`avatar-frame ${speaking ? "speaking" : ""}`}>
+              {avatarMode === "portrait" ? (
+                <img
+                  src={ANGELA_FACE}
+                  alt="Angela"
+                  className="portrait"
+                />
+              ) : (
+                <div ref={avatarMountRef} className="avatar-3d" />
+              )}
+              <div className="avatar-meta">
+                <strong>Angela</strong>
+                <span>{speaking ? "Speaking" : "Listening"}</span>
+              </div>
+            </div>
+            <div className="controls">
+              <p className="status">{status}</p>
+              <div className="mode-toggle">
+                <button
+                  type="button"
+                  className={avatarMode === "portrait" ? "active" : ""}
+                  onClick={() => void switchAvatarMode("portrait")}
+                >
+                  Angela look (photoreal still)
+                </button>
+                <button
+                  type="button"
+                  className={avatarMode === "3d" ? "active" : ""}
+                  onClick={() => void switchAvatarMode("3d")}
+                >
+                  3D lip-sync (OSS)
+                </button>
+              </div>
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void endSession(true)}
+              >
+                End interview
+              </button>
+              {error && <p className="err">{error}</p>}
+            </div>
+          </div>
+          <aside className="transcript">
+            <h3>Live transcript</h3>
+            <div className="lines">
+              {transcript.length === 0 && (
+                <p className="muted">Waiting for the conversation…</p>
+              )}
+              {transcript.map((line, i) => (
+                <p key={i} className={line.role}>
+                  <span>{line.role === "agent" ? "Angela" : "You"}</span>
+                  {line.text}
+                </p>
+              ))}
+            </div>
+          </aside>
+        </section>
+      )}
+
+      {step === "done" && (
+        <section className="card done">
+          <h2>Thank you</h2>
+          <p>
+            Your test interview has ended. A local report draft was saved for CRS
+            review. Angela never auto-rejects or ranks candidates — a human
+            follows up.
+          </p>
+          {conversationId && (
+            <p className="muted">Conversation id: {conversationId}</p>
+          )}
+          <button type="button" onClick={() => window.location.reload()}>
+            Start another test
+          </button>
+        </section>
+      )}
+
+      <footer>
+        CRS Behavioral Health · Angela interviewer · Talking Avatar OSS +
+        ElevenLabs · No Indeed integration in this build
+      </footer>
+    </div>
+  );
+}
+
+type AwaitableConversation = {
+  endSession: () => Promise<void>;
+  getId?: () => string;
+};
