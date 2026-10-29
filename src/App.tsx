@@ -23,6 +23,73 @@ type AvatarProvider = "talking-avatar-oss" | "heygen";
 
 type TranscriptLine = { role: "agent" | "user"; text: string; at: string };
 
+/** Pull spoken text from LiveAvatar / ElevenLabs passthrough payloads. */
+function extractLiveAvatarText(evt: unknown): string {
+  if (!evt || typeof evt !== "object") return "";
+  const e = evt as Record<string, unknown>;
+  const direct = [e.text, e.message, e.agent_response, e.user_transcript, e.user_transcription];
+  for (const v of direct) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  const data = e.data;
+  if (typeof data === "string" && data.trim()) return data.trim();
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    for (const v of [
+      d.text,
+      d.message,
+      d.agent_response,
+      d.user_transcript,
+      d.user_transcription,
+    ]) {
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    // Nested ElevenLabs shapes: agent_response_event / user_transcription_event
+    for (const nestKey of [
+      "agent_response_event",
+      "user_transcription_event",
+      "user_transcript_event",
+    ]) {
+      const nest = d[nestKey];
+      if (nest && typeof nest === "object") {
+        const n = nest as Record<string, unknown>;
+        for (const v of [
+          n.agent_response,
+          n.user_transcript,
+          n.user_transcription,
+          n.text,
+        ]) {
+          if (typeof v === "string" && v.trim()) return v.trim();
+        }
+      }
+    }
+  }
+  return "";
+}
+
+function appendTranscriptLine(
+  setTranscript: (updater: (prev: TranscriptLine[]) => TranscriptLine[]) => void,
+  role: "agent" | "user",
+  text: string,
+) {
+  const cleaned = text.trim();
+  if (!cleaned) return;
+  setTranscript((prev) => {
+    const last = prev[prev.length - 1];
+    if (last && last.role === role && last.text === cleaned) return prev;
+    // Replace streaming chunk with final when same role and prefix match
+    if (
+      last &&
+      last.role === role &&
+      cleaned.startsWith(last.text) &&
+      cleaned.length > last.text.length
+    ) {
+      return [...prev.slice(0, -1), { role, text: cleaned, at: new Date().toISOString() }];
+    }
+    return [...prev, { role, text: cleaned, at: new Date().toISOString() }];
+  });
+}
+
 const ANGELA_FACE = "/avatar/angela-face.webp";
 const ANGELA_LOOK = "/avatar/angela-look.jpg";
 const ANGELA_GLB = "/avatar/angela.glb";
@@ -258,8 +325,16 @@ export default function App() {
 
   const startHeygenInterview = async () => {
     setError("");
-    setStatus("Connecting LiveAvatar…");
     setTranscript([]);
+    // Warm the free Render instance before minting (cuts cold-start "Failed to fetch").
+    setStatus("1/4 Waking server…");
+    try {
+      await fetch("/api/health", { cache: "no-store" });
+    } catch {
+      /* continue — retry wrapper handles cold starts */
+    }
+
+    setStatus("2/4 Minting LiveAvatar session…");
     const { r, data } = await fetchAvatarSessionWithRetry();
     const sessionToken =
       typeof data.sessionToken === "string" ? data.sessionToken : "";
@@ -286,67 +361,66 @@ export default function App() {
 
     session.on(AgentEventsEnum.AVATAR_SPEAK_STARTED as never, () => {
       setSpeaking(true);
+      setStatus("Angela is speaking…");
     });
     session.on(AgentEventsEnum.AVATAR_SPEAK_ENDED as never, () => {
       setSpeaking(false);
+      setStatus("Listening…");
     });
     session.on(AgentEventsEnum.AVATAR_TRANSCRIPTION as never, (evt: unknown) => {
-      const text = (evt as { text?: string })?.text;
-      if (!text) return;
-      setTranscript((t) => [
-        ...t,
-        { role: "agent", text, at: new Date().toISOString() },
-      ]);
+      appendTranscriptLine(setTranscript, "agent", extractLiveAvatarText(evt));
     });
+    session.on(
+      AgentEventsEnum.AVATAR_TRANSCRIPTION_CHUNK as never,
+      (evt: unknown) => {
+        appendTranscriptLine(setTranscript, "agent", extractLiveAvatarText(evt));
+      },
+    );
     session.on(AgentEventsEnum.USER_TRANSCRIPTION as never, (evt: unknown) => {
-      const text =
-        (evt as { text?: string; data?: { text?: string } })?.text ||
-        (evt as { data?: { text?: string } })?.data?.text;
-      if (!text) return;
-      setTranscript((t) => [
-        ...t,
-        { role: "user", text, at: new Date().toISOString() },
-      ]);
+      appendTranscriptLine(setTranscript, "user", extractLiveAvatarText(evt));
     });
+    session.on(
+      AgentEventsEnum.USER_TRANSCRIPTION_CHUNK as never,
+      (evt: unknown) => {
+        appendTranscriptLine(setTranscript, "user", extractLiveAvatarText(evt));
+      },
+    );
     session.on(
       AgentEventsEnum.ELEVENLABS_AGENT_EVENT as never,
       (evt: unknown) => {
-        const e = evt as {
-          elevenlabs_event_type?: string;
-          data?: { agent_response?: string; user_transcription?: string; text?: string };
-        };
-        if (e.elevenlabs_event_type === "agent_response" && e.data) {
-          const text =
-            e.data.agent_response ||
-            (e.data as { text?: string }).text ||
-            "";
-          if (text) {
-            setTranscript((t) => [
-              ...t,
-              { role: "agent", text, at: new Date().toISOString() },
-            ]);
-          }
-        }
-        if (e.elevenlabs_event_type === "user_transcript" && e.data) {
-          const text =
-            (e.data as { user_transcription?: string; text?: string })
-              .user_transcription ||
-            (e.data as { text?: string }).text ||
-            "";
-          if (text) {
-            setTranscript((t) => [
-              ...t,
-              { role: "user", text, at: new Date().toISOString() },
-            ]);
-          }
+        const e = evt as { elevenlabs_event_type?: string };
+        const text = extractLiveAvatarText(evt);
+        const typ = e.elevenlabs_event_type || "";
+        if (
+          typ === "agent_response" ||
+          typ === "agent_response_correction" ||
+          typ === "internal_tentative_agent_response"
+        ) {
+          appendTranscriptLine(setTranscript, "agent", text);
+        } else if (typ === "user_transcript" || typ === "user_transcription") {
+          appendTranscriptLine(setTranscript, "user", text);
+        } else if (typ && text) {
+          // Unknown but textual — prefer agent for safety in interviewer UI
+          console.debug("LiveAvatar EL event", typ, text.slice(0, 80));
         }
       },
     );
+    session.on(AgentEventsEnum.SESSION_STOPPED as never, (evt: unknown) => {
+      const reason =
+        (evt as { stop_reason?: string })?.stop_reason || "session_stopped";
+      setStatus(`Session ended (${reason})`);
+      if (reason === "DISPATCH_FAILED" || reason === "SERVER_ERROR") {
+        setError(
+          `LiveAvatar stopped: ${reason}. Often means the ElevenLabs agent id in Render is missing or inaccessible.`,
+        );
+      }
+    });
 
     setStep("live");
-    setStatus("Starting LiveAvatar…");
+    setStatus("3/4 Joining LiveKit room + loading avatar video…");
     // Wait one frame so the <video> mounts before attach()
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const startedAt = performance.now();
     await session.start();
     if (heygenVideoRef.current) {
       session.attach(heygenVideoRef.current);
@@ -354,7 +428,10 @@ export default function App() {
       console.warn("HeyGen video element missing after mount");
     }
     if (data.sessionId) setConversationId(String(data.sessionId));
-    setStatus("Connected — Angela is with you (HeyGen LiveAvatar)");
+    const secs = Math.round((performance.now() - startedAt) / 1000);
+    setStatus(
+      `4/4 Connected — Angela LiveAvatar ready (~${secs}s join). Waiting for first words…`,
+    );
     // Wait for LiveAvatar media, then start recorders
     window.setTimeout(() => startSideRecorders(), 1500);
     window.setTimeout(() => {
@@ -741,7 +818,7 @@ export default function App() {
             <h3>Live transcript</h3>
             <div className="lines">
               {transcript.length === 0 && (
-                <p className="muted">Waiting for the conversation…</p>
+                <p className="muted">Waiting for the conversation… (if this stays empty, the ElevenLabs agent may be unreachable)</p>
               )}
               {transcript.map((line, i) => (
                 <p key={i} className={line.role}>

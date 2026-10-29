@@ -268,6 +268,7 @@ app.get("/api/health", async (_req, res) => {
   res.json({
     ok: true,
     agentConfigured: Boolean(AGENT_ID),
+    agentId: AGENT_ID,
     signedUrlReady: Boolean(ELEVEN_KEY),
     avatar: provider,
     avatarRequested: AVATAR_PROVIDER_REQ,
