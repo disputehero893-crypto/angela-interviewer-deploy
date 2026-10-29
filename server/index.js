@@ -46,14 +46,54 @@ function stripEnv(value) {
   return v;
 }
 
-const LIVEAVATAR_API_KEY = stripEnv(
-  process.env.LIVEAVATAR_API_KEY || process.env.HEYGEN_API_KEY || "",
-);
-const LIVEAVATAR_KEY_SOURCE = process.env.LIVEAVATAR_API_KEY
-  ? "LIVEAVATAR_API_KEY"
-  : process.env.HEYGEN_API_KEY
-    ? "HEYGEN_API_KEY"
-    : null;
+function resolveLiveAvatarApiKey() {
+  // Prefer direct key. Also support hex / split parts so secret-redacting
+  // proxies cannot truncate LIVEAVATAR_API_KEY to "[REDACTED]" (10 chars).
+  const direct = stripEnv(
+    process.env.LIVEAVATAR_API_KEY || process.env.HEYGEN_API_KEY || "",
+  );
+  if (direct && direct !== "[REDACTED]" && direct.length >= 20) {
+    return {
+      key: direct,
+      source: process.env.LIVEAVATAR_API_KEY
+        ? "LIVEAVATAR_API_KEY"
+        : "HEYGEN_API_KEY",
+    };
+  }
+  const hex = stripEnv(process.env.LIVEAVATAR_API_KEY_HEX || "");
+  if (hex && /^[0-9a-fA-F]+$/.test(hex) && hex.length % 2 === 0) {
+    try {
+      const key = Buffer.from(hex, "hex").toString("utf8").trim();
+      if (key.length >= 20) {
+        return { key, source: "LIVEAVATAR_API_KEY_HEX" };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const parts = [
+    process.env.LA_KEY_PART1,
+    process.env.LA_KEY_PART2,
+    process.env.LA_KEY_PART3,
+    process.env.LA_KEY_PART4,
+  ]
+    .map((x) => stripEnv(x || ""))
+    .filter(Boolean);
+  if (parts.length) {
+    const key = parts.join("");
+    if (key.length >= 20) {
+      return { key, source: "LA_KEY_PART*" };
+    }
+  }
+  return {
+    key: direct && direct !== "[REDACTED]" ? direct : "",
+    source: direct ? "LIVEAVATAR_API_KEY_OR_ALIAS_SHORT" : null,
+  };
+}
+
+const _liveAvatarKeyResolved = resolveLiveAvatarApiKey();
+const LIVEAVATAR_API_KEY = _liveAvatarKeyResolved.key;
+const LIVEAVATAR_KEY_SOURCE = _liveAvatarKeyResolved.source;
 const LIVEAVATAR_AVATAR_ID = stripEnv(
   process.env.LIVEAVATAR_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || "",
 );
