@@ -131,9 +131,21 @@ function heygenConfigured() {
   );
 }
 
-/** Effective avatar provider for this process. Never force heygen without keys. */
+const SIMLI_API_KEY = stripEnv(process.env.SIMLI_API_KEY || "");
+/** Default: Simli preset "Anna" (Trinity-2). Override with custom face from create-simli-face. */
+const SIMLI_FACE_ID = stripEnv(
+  process.env.SIMLI_FACE_ID || "bf13113a-355a-4d97-8b90-4edccd1da7b2",
+);
+
+function simliConfigured() {
+  return Boolean(SIMLI_API_KEY && SIMLI_FACE_ID);
+}
+
+/** Effective avatar provider for this process. Never force heygen/simli without keys. */
 function effectiveAvatarProvider() {
+  if (AVATAR_PROVIDER_REQ === "simli" && simliConfigured()) return "simli";
   if (AVATAR_PROVIDER_REQ === "heygen" && heygenConfigured()) return "heygen";
+  // Requested simli/heygen without keys → graceful OSS fallback
   return "talking-avatar-oss";
 }
 
@@ -275,6 +287,12 @@ app.get("/api/health", async (_req, res) => {
     heygenReady: heygenConfigured(),
     heygenAvatarIdSet: Boolean(LIVEAVATAR_AVATAR_ID),
     heygenKeySet: Boolean(LIVEAVATAR_API_KEY),
+    simliReady: simliConfigured(),
+    simliKeySet: Boolean(SIMLI_API_KEY),
+    simliFaceIdSet: Boolean(SIMLI_FACE_ID),
+    simliFaceIdPreview: SIMLI_FACE_ID
+      ? `${SIMLI_FACE_ID.slice(0, 8)}…`
+      : null,
     liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
     liveavatarAuthOk: liveavatarAuth ? Boolean(liveavatarAuth.ok) : null,
     liveavatarAuthMessage: liveavatarAuth?.message || null,
@@ -418,6 +436,9 @@ app.post("/api/avatar/diagnose", async (req, res) => {
     ok: true,
     avatar: effectiveAvatarProvider(),
     heygenConfigured: heygenConfigured(),
+    simliConfigured: simliConfigured(),
+    simliKeySet: Boolean(SIMLI_API_KEY),
+    simliFaceIdSet: Boolean(SIMLI_FACE_ID),
     liveavatarKeySet: Boolean(LIVEAVATAR_API_KEY),
     liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
     liveavatarKeyLength: LIVEAVATAR_API_KEY ? LIVEAVATAR_API_KEY.length : 0,
@@ -508,6 +529,76 @@ app.post("/api/avatar/session", async (_req, res) => {
       message,
       detail,
       hint: detail?.hint,
+    });
+  }
+});
+
+/**
+ * Mint a Simli session token (API key stays server-side).
+ * Client feeds ElevenLabs agent PCM16 audio into simli-client.
+ * Docs: POST https://api.simli.ai/compose/token with x-simli-api-key.
+ */
+app.post("/api/avatar/simli-session", async (_req, res) => {
+  if (!simliConfigured()) {
+    return res.status(400).json({
+      error: "simli_not_configured",
+      avatar: effectiveAvatarProvider(),
+      hint: "Set SIMLI_API_KEY (and optional SIMLI_FACE_ID). Free tier: ~50 min/month. Do not put the key in the browser.",
+    });
+  }
+  if (effectiveAvatarProvider() !== "simli" && AVATAR_PROVIDER_REQ !== "simli") {
+    // Allow mint when explicitly requested via AVATAR_PROVIDER=simli even if
+    // effective fell back (shouldn't happen when configured). Still mint for local tests.
+  }
+  try {
+    const config = {
+      faceId: SIMLI_FACE_ID,
+      handleSilence: true,
+      maxSessionLength: 600,
+      maxIdleTime: 180,
+      audioInputFormat: "pcm16",
+      streaming_width: 768,
+      streaming_height: 768,
+    };
+    const r = await fetch("https://api.simli.ai/compose/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-simli-api-key": SIMLI_API_KEY,
+      },
+      body: JSON.stringify(config),
+    });
+    const bodyText = await r.text();
+    let data;
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      data = null;
+    }
+    const sessionToken =
+      data?.session_token || data?.sessionToken || data?.token || null;
+    if (!r.ok || !sessionToken) {
+      return res.status(r.status || 502).json({
+        error: "simli_token_failed",
+        detail:
+          typeof data === "object" && data
+            ? data
+            : { raw: bodyText.slice(0, 300) },
+        hint: "Check SIMLI_API_KEY and SIMLI_FACE_ID. Free accounts are limited to ~50 minutes/month.",
+      });
+    }
+    res.json({
+      ok: true,
+      provider: "simli",
+      sessionToken,
+      faceId: SIMLI_FACE_ID,
+      agentId: AGENT_ID,
+      warnings: Array.isArray(data?.warnings) ? data.warnings : [],
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "simli_token_failed",
+      message: String(err?.message || err),
     });
   }
 });

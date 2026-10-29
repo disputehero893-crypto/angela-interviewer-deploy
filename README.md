@@ -1,14 +1,14 @@
-# angela-interviewer-deploy
-
-Public **deploy mirror** of `angela-interviewer` for Render (Render GitHub App cannot fetch private repos on this account).
-
-Source of truth: private repo `disputehero893-crypto/angela-interviewer`.
-No API keys or candidate data are included. Access gate + secrets are set in Render env vars.
-
 # Angela — CRS Behavioral Health AI Video Interviewer (TEST)
 
 Private test-mode live interviewer for CRS Behavioral Health nursing candidates.
 **Not** Syntalyn. **No Indeed** integration in this build.
+
+## Avatar providers
+
+- `talking-avatar-oss` (default / live on Render) — photoreal still + optional 3D lip-sync
+- `simli` — Simli Trinity video + ElevenLabs audio (`docs/SIMLI.md`). Requires `SIMLI_API_KEY`. Do not flip Render until local mint passes.
+- `heygen` — LiveAvatar (unused while OSS/simli preferred)
+
 
 ## Avatar choice (HeyGen dropped)
 
@@ -19,7 +19,7 @@ Private test-mode live interviewer for CRS Behavioral Health nursing candidates.
 | Tavus CVI | Free 25 min/mo; then ~$0.37/min or $59+/mo | ~500–600 ms | Photoreal replicas | Yes | Heavier stack; would replace/duplicate ElevenLabs voice path |
 | Ready Player Me | **Shut down Jan 31, 2026** | — | — | — | Not available |
 
-**Chosen:** Talking Avatar OSS (`@interviewflowai/talking-avatar`) + ElevenLabs agent, with Angela photoreal still (Amara/`angela-look`) as default face and optional Rocketbox GLB 3D lip-sync. No HeyGen. No paid activation required.
+**Chosen (live):** Talking Avatar OSS (`@interviewflowai/talking-avatar`) + ElevenLabs agent, with Angela photoreal still (Amara/`angela-look`) as default face and optional Rocketbox GLB 3D lip-sync. No HeyGen. No paid activation required.
 
 ## ElevenLabs agent
 
