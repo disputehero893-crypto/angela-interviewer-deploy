@@ -30,6 +30,18 @@ services:
         sync: false
       - key: SIMLI_FACE_ID
         sync: false
+      - key: ANAM_KEY_PART1
+        sync: false
+      - key: ANAM_KEY_PART2
+        sync: false
+      - key: ANAM_KEY_PART3
+        sync: false
+      - key: ANAM_KEY_PART4
+        sync: false
+      - key: ANAM_AVATAR_ID
+        value: 3ac87b47-a610-48a5-95fa-dc83c2e031a7
+      - key: ANAM_AVATAR_MODEL
+        value: cara-4.1-express
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

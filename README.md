@@ -6,8 +6,9 @@ Private test-mode live interviewer for CRS Behavioral Health nursing candidates.
 ## Avatar providers
 
 - `talking-avatar-oss` (default / live on Render) — photoreal still + optional 3D lip-sync
-- `simli` — Simli Trinity video + ElevenLabs audio (`docs/SIMLI.md`). Requires `SIMLI_API_KEY`. Do not flip Render until local mint passes.
-- `heygen` — LiveAvatar (unused while OSS/simli preferred)
+- `anam` — Anam Cara video + ElevenLabs Agents (`docs/ANAM.md`). Preferred. Requires `ANAM_KEY_PART*` + `ANAM_AVATAR_ID`. Falls back to Simli if Anam fails.
+- `simli` — Simli Trinity video + ElevenLabs audio (`docs/SIMLI.md`). Kept as fallback. Requires `SIMLI_API_KEY`.
+- `heygen` — LiveAvatar (unused while Anam/Simli preferred)
 
 
 ## Avatar choice (HeyGen dropped)

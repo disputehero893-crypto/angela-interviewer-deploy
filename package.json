@@ -14,6 +14,7 @@
     "test:recording": "node --test test/recording-api.test.js"
   },
   "dependencies": {
+    "@anam-ai/js-sdk": "^4.29.1",
     "@elevenlabs/client": "^1.32.0",
     "@heygen/liveavatar-web-sdk": "^0.0.19",
     "@interviewflowai/talking-avatar": "^0.2.0",

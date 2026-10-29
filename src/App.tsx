@@ -7,6 +7,7 @@ import {
   type LiveAvatarSession,
 } from "@heygen/liveavatar-web-sdk";
 import { SimliClient, LogLevel } from "simli-client";
+import { AnamEvent, createClient, type AnamClient } from "@anam-ai/js-sdk";
 import { createAudioTap } from "./audioTap";
 import { ROCKETBOX_MORPH_TARGETS } from "./morphTargets";
 import {
@@ -20,7 +21,7 @@ import "./App.css";
 
 type Step = "gate" | "consent" | "live" | "done";
 type AvatarMode = "portrait" | "3d";
-type AvatarProvider = "talking-avatar-oss" | "heygen" | "simli";
+type AvatarProvider = "talking-avatar-oss" | "heygen" | "simli" | "anam";
 
 type TranscriptLine = { role: "agent" | "user"; text: string; at: string };
 
@@ -130,6 +131,11 @@ export default function App() {
   const simliVideoRef = useRef<HTMLVideoElement | null>(null);
   const simliAudioRef = useRef<HTMLAudioElement | null>(null);
   const simliRef = useRef<SimliClient | null>(null);
+  const anamVideoRef = useRef<HTMLVideoElement | null>(null);
+  const anamRef = useRef<AnamClient | null>(null);
+  const anamMsgBufRef = useRef<Map<string, { role: "agent" | "user"; text: string }>>(
+    new Map(),
+  );
   const selfViewRef = useRef<HTMLVideoElement | null>(null);
   const portraitAudioRef = useRef<HTMLAudioElement | null>(null);
   const analyserCleanupRef = useRef<(() => void) | null>(null);
@@ -174,7 +180,8 @@ export default function App() {
       if (
         data.avatarProvider === "heygen" ||
         data.avatarProvider === "talking-avatar-oss" ||
-        data.avatarProvider === "simli"
+        data.avatarProvider === "simli" ||
+        data.avatarProvider === "anam"
       ) {
         intendedProviderRef.current = data.avatarProvider;
         setAvatarProvider(data.avatarProvider);
@@ -545,6 +552,172 @@ export default function App() {
     window.setTimeout(() => startSideRecorders(), 500);
   };
 
+
+  /**
+   * Anam Cara avatar + ElevenLabs Agents (server-minted session token).
+   * Anam owns mic + audio playback — do NOT start a second browser EL Conversation.
+   * Transcript from Anam MESSAGE_STREAM / MESSAGE_HISTORY; EL conversation id
+   * recovered via /api/elevenlabs/conversation when needed.
+   * On mint/start failure → Simli if configured, else OSS.
+   */
+  const startAnamInterview = async () => {
+    setError("");
+    setTranscript([]);
+    anamMsgBufRef.current = new Map();
+    intendedProviderRef.current = "anam";
+    setStatus("1/4 Waking server…");
+    try {
+      await fetch("/api/health", { cache: "no-store" });
+    } catch {
+      /* continue */
+    }
+
+    setStatus("2/4 Minting Anam session…");
+    let sessionToken = "";
+    let simliReady = false;
+    try {
+      const r = await fetch("/api/avatar/anam-session", { method: "POST" });
+      const data = (await r.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      sessionToken =
+        typeof data.sessionToken === "string" ? data.sessionToken : "";
+      simliReady = Boolean(data.simliReady);
+      if (!r.ok || !sessionToken) {
+        throw new Error(
+          [
+            data.message,
+            data.error,
+            data.hint,
+          ]
+            .map((x) => (typeof x === "string" ? x.trim() : ""))
+            .filter(Boolean)
+            .join(" — ") || "Failed to mint Anam session",
+        );
+      }
+    } catch (mintErr) {
+      console.warn("Anam mint failed — falling back", mintErr);
+      const detail = (mintErr as Error).message || String(mintErr);
+      setError(`Anam unavailable (${detail}). Falling back.`);
+      setStatus(`Anam mint failed — ${detail}`);
+      if (simliReady || (await fetch("/api/health").then((h) => h.json()).then((h) => Boolean(h.simliReady)).catch(() => false))) {
+        setAvatarProvider("simli");
+        await startSimliInterview();
+      } else {
+        setAvatarProvider("talking-avatar-oss");
+        await startOssInterview();
+      }
+      return;
+    }
+
+    setStep("live");
+    setStatus("3/4 Starting Anam video…");
+    let videoEl: HTMLVideoElement | null = null;
+    for (let i = 0; i < 40; i++) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      videoEl = anamVideoRef.current;
+      if (videoEl) break;
+    }
+    if (!videoEl) {
+      const detail = "Anam video element missing after mount wait";
+      setError(`${detail} — falling back`);
+      setStatus(detail);
+      setAvatarProvider("simli");
+      await startSimliInterview();
+      return;
+    }
+    if (!videoEl.id) videoEl.id = "anam-avatar-video";
+
+    setStatus("4/4 Connecting Anam + ElevenLabs agent…");
+    try {
+      const client = createClient(sessionToken);
+      anamRef.current = client;
+
+      client.addListener(AnamEvent.MESSAGE_STREAM_EVENT_RECEIVED, (evt) => {
+        const id = String(evt?.id || "");
+        const chunk = String(evt?.content || "");
+        if (!id || !chunk) return;
+        const role: "agent" | "user" =
+          evt?.role === "user" ? "user" : "agent";
+        const prev = anamMsgBufRef.current.get(id);
+        const nextText = (prev?.text || "") + chunk;
+        anamMsgBufRef.current.set(id, { role, text: nextText });
+        appendTranscriptLine(setTranscript, role, nextText);
+        if (role === "agent") {
+          setSpeaking(true);
+          setStatus("Angela is speaking…");
+        }
+      });
+
+      client.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (history) => {
+        if (!Array.isArray(history)) return;
+        for (const msg of history) {
+          const role: "agent" | "user" =
+            msg?.role === "user" ? "user" : "agent";
+          const content = String(msg?.content || "").trim();
+          if (content) appendTranscriptLine(setTranscript, role, content);
+        }
+      });
+
+      client.addListener(AnamEvent.USER_SPEECH_STARTED, () => {
+        setSpeaking(false);
+        setStatus("Listening…");
+      });
+      client.addListener(AnamEvent.USER_SPEECH_ENDED, () => {
+        setStatus("Listening…");
+      });
+      client.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => {
+        setSpeaking(true);
+        setStatus("Angela is speaking…");
+      });
+      client.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+        setStatus((prev) =>
+          prev.startsWith("Error") || prev.startsWith("Anam")
+            ? prev
+            : "Disconnected",
+        );
+      });
+      client.addListener(AnamEvent.SESSION_READY, (sessionId) => {
+        setStatus("Connected — waiting for Angela’s opening…");
+        const sid =
+          (typeof sessionId === "string" && sessionId) ||
+          client.getActiveSessionId?.() ||
+          null;
+        if (sid) setConversationId((prev) => prev || `anam:${sid}`);
+      });
+
+      await client.streamToVideoElement(videoEl.id);
+      setStatus("Connected — waiting for Angela’s opening…");
+      window.setTimeout(() => startSideRecorders(), 800);
+    } catch (startErr) {
+      console.warn("Anam start failed — falling back", startErr);
+      try {
+        await anamRef.current?.stopStreaming();
+      } catch {
+        /* ignore */
+      }
+      anamRef.current = null;
+      const detail = String((startErr as Error)?.message || startErr);
+      setError(`Anam start failed (${detail}). Falling back.`);
+      setStatus(`Anam start failed — ${detail}`);
+      try {
+        const health = await fetch("/api/health").then((h) => h.json());
+        if (health.simliReady) {
+          setAvatarProvider("simli");
+          await startSimliInterview();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      setAvatarProvider("talking-avatar-oss");
+      await startOssInterview();
+    }
+  };
+
   /**
    * Simli video avatar: server mints session_token (SIMLI_API_KEY never leaves
    * the server). ElevenLabs Conversation drives audio; we mute EL playback and
@@ -763,6 +936,8 @@ export default function App() {
       intendedProviderRef.current = avatarProvider;
       if (avatarProvider === "heygen") {
         await startHeygenInterview();
+      } else if (avatarProvider === "anam") {
+        await startAnamInterview();
       } else if (avatarProvider === "simli") {
         await startSimliInterview();
       } else {
@@ -775,7 +950,7 @@ export default function App() {
   };
 
   const switchAvatarMode = async (mode: AvatarMode) => {
-    if (avatarProvider === "heygen" || avatarProvider === "simli") return;
+    if (avatarProvider === "heygen" || avatarProvider === "simli" || avatarProvider === "anam") return;
     setAvatarMode(mode);
     const stream = streamRef.current;
     if (!stream || step !== "live") return;
@@ -816,6 +991,16 @@ export default function App() {
       if (heygen) {
         try {
           await heygen.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const anam = anamRef.current;
+      anamRef.current = null;
+      if (anam) {
+        try {
+          await anam.stopStreaming();
         } catch {
           /* ignore */
         }
@@ -950,6 +1135,11 @@ export default function App() {
                 interviewer for CRS Behavioral Health. This is a test-mode
                 session using fictional candidate data.
               </p>
+              <p className="muted">
+                AI disclosure: Angela is an artificial intelligence avatar, not a
+                human. Your conversation is recorded and transcribed for hiring
+                review only.
+              </p>
               <ul>
                 <li>
                   Your voice will be <strong>recorded and transcribed</strong> so
@@ -969,9 +1159,11 @@ export default function App() {
                 Avatar:{" "}
                 {avatarProvider === "heygen"
                   ? "HeyGen LiveAvatar (Interactive)"
-                  : avatarProvider === "simli"
-                    ? "Simli + ElevenLabs"
-                    : "Talking Avatar OSS"}
+                  : avatarProvider === "anam"
+                    ? "Anam + ElevenLabs"
+                    : avatarProvider === "simli"
+                      ? "Simli + ElevenLabs"
+                      : "Talking Avatar OSS"}
               </p>
               <label className="check">
                 <input
@@ -1021,6 +1213,14 @@ export default function App() {
                   autoPlay
                   playsInline
                 />
+              ) : avatarProvider === "anam" ? (
+                <video
+                  id="anam-avatar-video"
+                  ref={anamVideoRef}
+                  className="heygen-video anam-video"
+                  autoPlay
+                  playsInline
+                />
               ) : avatarProvider === "simli" ? (
                 <>
                   <video
@@ -1036,7 +1236,9 @@ export default function App() {
                   src={
                     intendedProviderRef.current === "simli"
                       ? SIMLI_SARA
-                      : ANGELA_FACE
+                      : intendedProviderRef.current === "anam"
+                        ? ANGELA_LOOK
+                        : ANGELA_FACE
                   }
                   alt="Angela"
                   className="portrait"
@@ -1125,9 +1327,11 @@ export default function App() {
         CRS Behavioral Health · Angela interviewer ·{" "}
         {avatarProvider === "heygen"
           ? "HeyGen LiveAvatar + ElevenLabs"
-          : avatarProvider === "simli"
-            ? "Simli + ElevenLabs"
-            : "Talking Avatar OSS + ElevenLabs"}{" "}
+          : avatarProvider === "anam"
+            ? "Anam + ElevenLabs"
+            : avatarProvider === "simli"
+              ? "Simli + ElevenLabs"
+              : "Talking Avatar OSS + ElevenLabs"}{" "}
         · No Indeed integration in this build
       </footer>
     </div>

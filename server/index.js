@@ -222,11 +222,52 @@ function simliConfigured() {
   return Boolean(SIMLI_API_KEY && SIMLI_FACE_ID);
 }
 
-/** Effective avatar provider for this process. Never force heygen/simli without keys. */
+function resolveAnamApiKey() {
+  const direct = stripEnv(process.env.ANAM_API_KEY || "");
+  if (direct && direct !== "[REDACTED]" && direct.length >= 20) {
+    return { key: direct, source: "ANAM_API_KEY" };
+  }
+  const parts = [
+    process.env.ANAM_KEY_PART1,
+    process.env.ANAM_KEY_PART2,
+    process.env.ANAM_KEY_PART3,
+    process.env.ANAM_KEY_PART4,
+  ]
+    .map((x) => stripEnv(x || ""))
+    .filter(Boolean);
+  if (parts.length) {
+    const key = parts.join("");
+    if (key.length >= 20) {
+      return { key, source: "ANAM_KEY_PART*" };
+    }
+  }
+  return {
+    key: direct && direct !== "[REDACTED]" ? direct : "",
+    source: direct ? "ANAM_API_KEY_SHORT" : null,
+  };
+}
+
+const _anamKeyResolved = resolveAnamApiKey();
+const ANAM_API_KEY = _anamKeyResolved.key;
+const ANAM_KEY_SOURCE = _anamKeyResolved.source;
+const ANAM_AVATAR_ID = stripEnv(
+  process.env.ANAM_AVATAR_ID || "3ac87b47-a610-48a5-95fa-dc83c2e031a7",
+);
+const ANAM_AVATAR_MODEL = stripEnv(
+  process.env.ANAM_AVATAR_MODEL || "cara-4.1-express",
+);
+
+function anamConfigured() {
+  return Boolean(ANAM_API_KEY && ANAM_AVATAR_ID && ELEVEN_KEY && AGENT_ID);
+}
+
+/** Effective avatar provider for this process. Never force heygen/simli/anam without keys. */
 function effectiveAvatarProvider() {
+  if (AVATAR_PROVIDER_REQ === "anam" && anamConfigured()) return "anam";
+  if (AVATAR_PROVIDER_REQ === "anam" && simliConfigured()) return "simli";
   if (AVATAR_PROVIDER_REQ === "simli" && simliConfigured()) return "simli";
   if (AVATAR_PROVIDER_REQ === "heygen" && heygenConfigured()) return "heygen";
-  // Requested simli/heygen without keys → graceful OSS fallback
+  // Requested video provider without keys → graceful OSS fallback
   return "talking-avatar-oss";
 }
 
@@ -376,6 +417,14 @@ app.get("/api/health", async (_req, res) => {
     simliFaceIdPreview: SIMLI_FACE_ID
       ? `${SIMLI_FACE_ID.slice(0, 8)}…`
       : null,
+    anamReady: anamConfigured(),
+    anamKeySet: Boolean(ANAM_API_KEY),
+    anamKeySource: ANAM_KEY_SOURCE,
+    anamAvatarIdSet: Boolean(ANAM_AVATAR_ID),
+    anamAvatarIdPreview: ANAM_AVATAR_ID
+      ? `${ANAM_AVATAR_ID.slice(0, 8)}…`
+      : null,
+    anamAvatarModel: ANAM_AVATAR_MODEL,
     liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
     liveavatarAuthOk: liveavatarAuth ? Boolean(liveavatarAuth.ok) : null,
     liveavatarAuthMessage: liveavatarAuth?.message || null,
@@ -622,6 +671,110 @@ app.post("/api/avatar/session", async (_req, res) => {
  * Client feeds ElevenLabs agent PCM16 audio into simli-client.
  * Docs: POST https://api.simli.ai/compose/token with x-simli-api-key.
  */
+/**
+ * Mint an Anam session token for ElevenLabs Agents integration.
+ * Fetches an EL signed URL server-side, then POST /v1/auth/session-token
+ * with environment.elevenLabsAgentSettings. API keys never leave the server.
+ * Docs: https://anam.ai/docs/integrations/elevenlabs/server-side-setup
+ */
+app.post("/api/avatar/anam-session", async (_req, res) => {
+  if (!anamConfigured()) {
+    return res.status(400).json({
+      error: "anam_not_configured",
+      avatar: effectiveAvatarProvider(),
+      simliReady: simliConfigured(),
+      hint: "Set ANAM_API_KEY or ANAM_KEY_PART1..4, ANAM_AVATAR_ID, and ELEVENLABS_API_KEY (or EL_KEY_PART*).",
+    });
+  }
+  try {
+    const signedUrlRes = await fetch(
+      `https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(AGENT_ID)}`,
+      { headers: { "xi-api-key": ELEVEN_KEY } },
+    );
+    const signedText = await signedUrlRes.text();
+    let signedData;
+    try {
+      signedData = JSON.parse(signedText);
+    } catch {
+      signedData = null;
+    }
+    const signedUrl =
+      signedData?.signed_url || signedData?.signedUrl || null;
+    if (!signedUrlRes.ok || !signedUrl) {
+      return res.status(signedUrlRes.status || 502).json({
+        error: "elevenlabs_signed_url_failed",
+        detail:
+          typeof signedData === "object" && signedData
+            ? signedData
+            : { raw: signedText.slice(0, 300) },
+        simliReady: simliConfigured(),
+      });
+    }
+
+    const anamRes = await fetch("https://api.anam.ai/v1/auth/session-token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ANAM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        maxSessions: 3,
+        expiresInSeconds: 900,
+        personaConfig: {
+          avatarId: ANAM_AVATAR_ID,
+          avatarModel: ANAM_AVATAR_MODEL,
+          directorNotes: {
+            presetStyle: "warm",
+            expressivity: 0.5,
+          },
+        },
+        environment: {
+          type: "elevenlabs_agent",
+          elevenLabsAgentSettings: {
+            signedUrl,
+            agentId: AGENT_ID,
+          },
+        },
+      }),
+    });
+    const anamText = await anamRes.text();
+    let anamData;
+    try {
+      anamData = JSON.parse(anamText);
+    } catch {
+      anamData = null;
+    }
+    const sessionToken =
+      anamData?.sessionToken || anamData?.session_token || null;
+    if (!anamRes.ok || !sessionToken) {
+      return res.status(anamRes.status || 502).json({
+        error: "anam_token_failed",
+        detail:
+          typeof anamData === "object" && anamData
+            ? anamData
+            : { raw: anamText.slice(0, 300) },
+        simliReady: simliConfigured(),
+        hint: "Check ANAM_API_KEY / ANAM_AVATAR_ID. Free plan includes limited minutes/month.",
+      });
+    }
+    res.json({
+      ok: true,
+      provider: "anam",
+      sessionToken,
+      avatarId: ANAM_AVATAR_ID,
+      avatarModel: ANAM_AVATAR_MODEL,
+      agentId: AGENT_ID,
+      simliReady: simliConfigured(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "anam_token_failed",
+      message: String(err?.message || err),
+      simliReady: simliConfigured(),
+    });
+  }
+});
+
 app.post("/api/avatar/simli-session", async (_req, res) => {
   if (!simliConfigured()) {
     return res.status(400).json({
@@ -682,6 +835,37 @@ app.post("/api/avatar/simli-session", async (_req, res) => {
   } catch (err) {
     res.status(500).json({
       error: "simli_token_failed",
+      message: String(err?.message || err),
+    });
+  }
+});
+
+
+app.get("/api/elevenlabs/conversation/:id", async (req, res) => {
+  if (!ELEVEN_KEY) {
+    return res.status(400).json({ error: "elevenlabs_key_missing" });
+  }
+  const id = String(req.params.id || "").trim();
+  if (!id) return res.status(400).json({ error: "missing_conversation_id" });
+  try {
+    const r = await fetch(
+      `https://api.elevenlabs.io/v1/convai/conversations/${encodeURIComponent(id)}`,
+      { headers: { "xi-api-key": ELEVEN_KEY } },
+    );
+    const textBody = await r.text();
+    let data;
+    try {
+      data = JSON.parse(textBody);
+    } catch {
+      data = { raw: textBody.slice(0, 500) };
+    }
+    if (!r.ok) {
+      return res.status(r.status).json({ error: "conversation_fetch_failed", detail: data });
+    }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({
+      error: "conversation_fetch_failed",
       message: String(err?.message || err),
     });
   }
