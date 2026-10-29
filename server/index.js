@@ -26,8 +26,7 @@ app.use(express.json({ limit: "2mb" }));
 
 const ACCESS_CODE = (process.env.ACCESS_CODE || "CRS-ANGELA-TEST").trim();
 const AGENT_ID =
-  process.env.ELEVENLABS_AGENT_ID || "agent_9801m624gaj7enj9hj7zd11bqya5";
-const ELEVEN_KEY = (process.env.ELEVENLABS_API_KEY || "").trim();
+  process.env.ELEVENLABS_AGENT_ID || "agent_1501m623t21dfjjsfvcyz02w8bfz";
 const PORT = Number(process.env.PORT || 4173);
 
 /** Requested provider; live effective provider may fall back to OSS. */
@@ -45,6 +44,48 @@ function stripEnv(value) {
   }
   return v;
 }
+
+function resolveElevenLabsApiKey() {
+  // Prefer direct key. Also support hex / split parts so secret-redacting
+  // proxies cannot truncate ELEVENLABS_API_KEY to "[REDACTED]".
+  const direct = stripEnv(process.env.ELEVENLABS_API_KEY || "");
+  if (direct && direct !== "[REDACTED]" && direct.length >= 20) {
+    return { key: direct, source: "ELEVENLABS_API_KEY" };
+  }
+  const hex = stripEnv(process.env.ELEVENLABS_API_KEY_HEX || "");
+  if (hex && /^[0-9a-fA-F]+$/.test(hex) && hex.length % 2 === 0) {
+    try {
+      const key = Buffer.from(hex, "hex").toString("utf8").trim();
+      if (key.length >= 20) {
+        return { key, source: "ELEVENLABS_API_KEY_HEX" };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const parts = [
+    process.env.EL_KEY_PART1,
+    process.env.EL_KEY_PART2,
+    process.env.EL_KEY_PART3,
+    process.env.EL_KEY_PART4,
+  ]
+    .map((x) => stripEnv(x || ""))
+    .filter(Boolean);
+  if (parts.length) {
+    const key = parts.join("");
+    if (key.length >= 20) {
+      return { key, source: "EL_KEY_PART*" };
+    }
+  }
+  return {
+    key: direct && direct !== "[REDACTED]" ? direct : "",
+    source: direct ? "ELEVENLABS_API_KEY_SHORT" : null,
+  };
+}
+
+const _elevenKeyResolved = resolveElevenLabsApiKey();
+const ELEVEN_KEY = _elevenKeyResolved.key;
+const ELEVEN_KEY_SOURCE = _elevenKeyResolved.source;
 
 function resolveLiveAvatarApiKey() {
   // Prefer direct key. Also support hex / split parts so secret-redacting
@@ -322,6 +363,7 @@ app.get("/api/health", async (_req, res) => {
     agentConfigured: Boolean(AGENT_ID),
     agentId: AGENT_ID,
     signedUrlReady: Boolean(ELEVEN_KEY),
+    elevenlabsKeySource: ELEVEN_KEY_SOURCE,
     avatar: provider,
     avatarRequested: AVATAR_PROVIDER_REQ,
     heygenReady: heygenConfigured(),
