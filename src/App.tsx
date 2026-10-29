@@ -93,6 +93,8 @@ function appendTranscriptLine(
 
 const ANGELA_FACE = "/avatar/angela-face.webp";
 const ANGELA_LOOK = "/avatar/angela-look.jpg";
+/** Simli preset Sara — landing/pre-session still when AVATAR_PROVIDER=simli */
+const SIMLI_SARA = "/avatar/simli-sara.jpg";
 const ANGELA_GLB = "/avatar/angela.glb";
 
 export default function App() {
@@ -869,7 +871,7 @@ export default function App() {
         <section className="card consent">
           <div className="consent-grid">
             <img
-              src={ANGELA_LOOK}
+              src={avatarProvider === "simli" ? SIMLI_SARA : ANGELA_LOOK}
               alt="Angela, CRS AI interviewer"
               className="consent-photo"
             />

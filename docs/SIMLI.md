@@ -7,7 +7,7 @@
 | Var | Required | Notes |
 |-----|----------|-------|
 | `SIMLI_API_KEY` | yes | Server only. Never `NEXT_PUBLIC_` / browser. |
-| `SIMLI_FACE_ID` | optional | Defaults to preset **Anna** (`bf13113a-355a-4d97-8b90-4edccd1da7b2`). |
+| `SIMLI_FACE_ID` | optional | Defaults to preset **Sara** (`f735e62c-dce7-4c0b-8e85-1c7e21774c45`) — closest free-tier match to Angela brief (custom photo face blocked on free plan). |
 | `AVATAR_PROVIDER` | — | Set to `simli` only after key + local mint test. Leave Render on `talking-avatar-oss` until then. |
 
 Free plan: ~50 minutes / month. Do not enable paid features without approval.
@@ -27,7 +27,7 @@ SIMLI_API_KEY=… node scripts/create-simli-face.mjs
 # → set SIMLI_FACE_ID=<face_id> after generation completes (~hours for Trinity-2)
 ```
 
-If API create is blocked on free tier, keep the Anna preset (or another [Default Face](https://docs.simli.com/api-reference/preset-faces)) until a custom face is available in the Simli web app.
+If API create is blocked on free tier, keep the Sara preset (or another [Default Face](https://docs.simli.com/api-reference/preset-faces)) until a custom face is available in the Simli web app. Landing still: `public/avatar/simli-sara.jpg` when `AVATAR_PROVIDER=simli`; OSS keeps `angela-look.jpg` / `angela-face.webp`.
 
 ## Local test without switching Render
 

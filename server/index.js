@@ -131,10 +131,50 @@ function heygenConfigured() {
   );
 }
 
-const SIMLI_API_KEY = stripEnv(process.env.SIMLI_API_KEY || "");
-/** Default: Simli preset "Anna" (Trinity-2). Override with custom face from create-simli-face. */
+function resolveSimliApiKey() {
+  // Prefer direct key. Also support hex / split parts so secret-redacting
+  // proxies cannot truncate SIMLI_API_KEY to "[REDACTED]" (10 chars).
+  const direct = stripEnv(process.env.SIMLI_API_KEY || "");
+  if (direct && direct !== "[REDACTED]" && direct.length >= 16) {
+    return { key: direct, source: "SIMLI_API_KEY" };
+  }
+  const hex = stripEnv(process.env.SIMLI_API_KEY_HEX || "");
+  if (hex && /^[0-9a-fA-F]+$/.test(hex) && hex.length % 2 === 0) {
+    try {
+      const key = Buffer.from(hex, "hex").toString("utf8").trim();
+      if (key.length >= 16) {
+        return { key, source: "SIMLI_API_KEY_HEX" };
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const parts = [
+    process.env.SIMLI_KEY_PART1,
+    process.env.SIMLI_KEY_PART2,
+    process.env.SIMLI_KEY_PART3,
+    process.env.SIMLI_KEY_PART4,
+  ]
+    .map((x) => stripEnv(x || ""))
+    .filter(Boolean);
+  if (parts.length) {
+    const key = parts.join("");
+    if (key.length >= 16) {
+      return { key, source: "SIMLI_KEY_PART*" };
+    }
+  }
+  return {
+    key: direct && direct !== "[REDACTED]" ? direct : "",
+    source: direct ? "SIMLI_API_KEY_SHORT" : null,
+  };
+}
+
+const _simliKeyResolved = resolveSimliApiKey();
+const SIMLI_API_KEY = _simliKeyResolved.key;
+const SIMLI_KEY_SOURCE = _simliKeyResolved.source;
+/** Default: Simli preset "Sara" (closest free-tier match to Angela brief). */
 const SIMLI_FACE_ID = stripEnv(
-  process.env.SIMLI_FACE_ID || "bf13113a-355a-4d97-8b90-4edccd1da7b2",
+  process.env.SIMLI_FACE_ID || "f735e62c-dce7-4c0b-8e85-1c7e21774c45",
 );
 
 function simliConfigured() {
@@ -289,6 +329,7 @@ app.get("/api/health", async (_req, res) => {
     heygenKeySet: Boolean(LIVEAVATAR_API_KEY),
     simliReady: simliConfigured(),
     simliKeySet: Boolean(SIMLI_API_KEY),
+    simliKeySource: SIMLI_KEY_SOURCE,
     simliFaceIdSet: Boolean(SIMLI_FACE_ID),
     simliFaceIdPreview: SIMLI_FACE_ID
       ? `${SIMLI_FACE_ID.slice(0, 8)}…`
@@ -438,6 +479,7 @@ app.post("/api/avatar/diagnose", async (req, res) => {
     heygenConfigured: heygenConfigured(),
     simliConfigured: simliConfigured(),
     simliKeySet: Boolean(SIMLI_API_KEY),
+    simliKeySource: SIMLI_KEY_SOURCE,
     simliFaceIdSet: Boolean(SIMLI_FACE_ID),
     liveavatarKeySet: Boolean(LIVEAVATAR_API_KEY),
     liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
