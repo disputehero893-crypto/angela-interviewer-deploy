@@ -1,3 +1,10 @@
+# angela-interviewer-deploy
+
+Public **deploy mirror** of `angela-interviewer` for Render (Render GitHub App cannot fetch private repos on this account).
+
+Source of truth: private repo `disputehero893-crypto/angela-interviewer`.
+No API keys or candidate data are included. Access gate + secrets are set in Render env vars.
+
 # Angela — CRS Behavioral Health AI Video Interviewer (TEST)
 
 Private test-mode live interviewer for CRS Behavioral Health nursing candidates.

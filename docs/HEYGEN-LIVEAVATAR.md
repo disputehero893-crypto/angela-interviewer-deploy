@@ -44,3 +44,33 @@ LITE (Avatar Only) = **1 credit per minute**. Free tier ≈ 10 minutes/month. No
 2. Create or pick a LiveAvatar `avatar_id` (classic HeyGen Angela look may need re-creation).
 3. Put in Render env (never commit): `LIVEAVATAR_API_KEY`, `LIVEAVATAR_AVATAR_ID`, and either `LIVEAVATAR_ELEVENLABS_SECRET_ID` or `ELEVENLABS_API_KEY`.
 4. Only then set `AVATAR_PROVIDER=heygen`. Without keys the server stays on OSS so the site does not break.
+
+
+## Troubleshooting (2026-10-29)
+
+### `heygen_secret_register_failed` / `Invalid API key`
+
+LiveAvatar (`api.liveavatar.com`) rejected the configured key. Common cause: a **classic HeyGen** API key from `app.heygen.com` was pasted into `HEYGEN_API_KEY` / `LIVEAVATAR_API_KEY`. LiveAvatar keys are separate — create one at **https://app.liveavatar.com/developers** and set `LIVEAVATAR_API_KEY` in Render (prefer that name over the HEYGEN_ alias).
+
+Check without exposing secrets:
+
+```bash
+curl -sS -X POST https://angela-interviewer.onrender.com/api/avatar/diagnose \
+  -H 'Content-Type: application/json' \
+  -d '{"code":"CRS-ANGELA-TEST"}'
+```
+
+Look for `auth.ok`, `auth.heygenClassicLooksValid`, and `auth.hint`. `/api/health` also reports `liveavatarAuthOk`.
+
+### First click `Failed to fetch`
+
+Render free tier cold-starts. Logs around 2026-10-29 16:37 UTC showed `npm start` while the browser hit Start interview. The client now retries `/api/avatar/session` a few times. If it still fails, wait ~30s and retry.
+
+### `recordingReady: false`
+
+Missing `SUPABASE_SERVICE_ROLE_KEY` (URL alone is not enough). **Does not block** Start interview — only interview video upload/review is disabled.
+
+### Credits / paid plan
+
+- LiveAvatar Free: $0 / 10 credits/mo (LITE = 1 credit/min). Essential $99 / 1,100 credits. Sessions cannot start with 0 credits unless `LIVEAVATAR_SANDBOX=true` (Wayne avatar only, ~1 min, no credits).
+- ElevenLabs Agent Connector requires a **paid** ElevenLabs plan (free-tier keys are blocked for third-party connectors).

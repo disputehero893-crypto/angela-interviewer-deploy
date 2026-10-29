@@ -34,21 +34,37 @@ const PORT = Number(process.env.PORT || 4173);
 const AVATAR_PROVIDER_REQ = (
   process.env.AVATAR_PROVIDER || "talking-avatar-oss"
 ).trim();
-const LIVEAVATAR_API_KEY = (
-  process.env.LIVEAVATAR_API_KEY ||
-  process.env.HEYGEN_API_KEY ||
-  ""
-).trim();
-const LIVEAVATAR_AVATAR_ID = (
-  process.env.LIVEAVATAR_AVATAR_ID ||
-  process.env.HEYGEN_AVATAR_ID ||
-  ""
-).trim();
-let liveAvatarElSecretId = (
+function stripEnv(value) {
+  let v = String(value || "").trim();
+  // Render/dashboard pastes sometimes wrap secrets in quotes or include a trailing newline.
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'"))
+  ) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+const LIVEAVATAR_API_KEY = stripEnv(
+  process.env.LIVEAVATAR_API_KEY || process.env.HEYGEN_API_KEY || "",
+);
+const LIVEAVATAR_KEY_SOURCE = process.env.LIVEAVATAR_API_KEY
+  ? "LIVEAVATAR_API_KEY"
+  : process.env.HEYGEN_API_KEY
+    ? "HEYGEN_API_KEY"
+    : null;
+const LIVEAVATAR_AVATAR_ID = stripEnv(
+  process.env.LIVEAVATAR_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || "",
+);
+let liveAvatarElSecretId = stripEnv(
   process.env.LIVEAVATAR_ELEVENLABS_SECRET_ID ||
-  process.env.HEYGEN_ELEVENLABS_SECRET_ID ||
-  ""
-).trim();
+    process.env.HEYGEN_ELEVENLABS_SECRET_ID ||
+    "",
+);
+const LIVEAVATAR_SANDBOX =
+  String(process.env.LIVEAVATAR_SANDBOX || "").trim().toLowerCase() ===
+  "true";
 
 function heygenConfigured() {
   return Boolean(
@@ -64,6 +80,112 @@ function effectiveAvatarProvider() {
   return "talking-avatar-oss";
 }
 
+/**
+ * Probe LiveAvatar auth without logging secret values.
+ * Classic HeyGen Interactive keys from app.heygen.com do NOT work here —
+ * keys must come from https://app.liveavatar.com/developers.
+ */
+async function probeLiveAvatarAuth() {
+  if (!LIVEAVATAR_API_KEY) {
+    return {
+      ok: false,
+      status: null,
+      code: null,
+      message: "missing_liveavatar_api_key",
+      keySource: LIVEAVATAR_KEY_SOURCE,
+      heygenClassicLooksValid: null,
+    };
+  }
+  const headers = {
+    "X-API-KEY": LIVEAVATAR_API_KEY,
+    accept: "application/json",
+  };
+  let status = null;
+  let code = null;
+  let message = null;
+  try {
+    const r = await fetch("https://api.liveavatar.com/v1/users/credits", {
+      method: "GET",
+      headers,
+    });
+    status = r.status;
+    const text = await r.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+    code = data?.code ?? null;
+    message =
+      data?.message ||
+      (r.ok ? "ok" : `liveavatar_http_${r.status}`);
+    // Never include response bodies that might echo secrets; credits payload is fine.
+    if (r.ok) {
+      return {
+        ok: true,
+        status,
+        code,
+        message: "ok",
+        keySource: LIVEAVATAR_KEY_SOURCE,
+        heygenClassicLooksValid: null,
+        creditsRemaining:
+          data?.data?.remaining_credits ??
+          data?.data?.credit ??
+          data?.remaining_credits ??
+          null,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      status: null,
+      code: null,
+      message: String(err?.message || err).slice(0, 120),
+      keySource: LIVEAVATAR_KEY_SOURCE,
+      heygenClassicLooksValid: null,
+    };
+  }
+
+  // If LiveAvatar rejects the key, check whether it looks like a classic HeyGen key.
+  let heygenClassicLooksValid = null;
+  try {
+    const hr = await fetch("https://api.heygen.com/v2/user/remaining_quota", {
+      method: "GET",
+      headers: {
+        "X-Api-Key": LIVEAVATAR_API_KEY,
+        accept: "application/json",
+      },
+    });
+    heygenClassicLooksValid = hr.ok;
+  } catch {
+    heygenClassicLooksValid = false;
+  }
+
+  return {
+    ok: false,
+    status,
+    code,
+    message,
+    keySource: LIVEAVATAR_KEY_SOURCE,
+    heygenClassicLooksValid,
+    hint: heygenClassicLooksValid
+      ? "This key authenticates to api.heygen.com but NOT api.liveavatar.com. Create a LiveAvatar API key at https://app.liveavatar.com/developers and set LIVEAVATAR_API_KEY (classic HeyGen Interactive keys are not compatible)."
+      : "LiveAvatar rejected this API key (Invalid API key). Create/rotate a key at https://app.liveavatar.com/developers and set LIVEAVATAR_API_KEY in Render. Do not use a classic HeyGen video/interactive key.",
+  };
+}
+
+let liveAvatarAuthCache = { at: 0, value: null };
+async function cachedLiveAvatarAuth(force = false) {
+  const now = Date.now();
+  if (!force && liveAvatarAuthCache.value && now - liveAvatarAuthCache.at < 60_000) {
+    return liveAvatarAuthCache.value;
+  }
+  const value = await probeLiveAvatarAuth();
+  liveAvatarAuthCache = { at: now, value };
+  return value;
+}
+
 function readReports() {
   try {
     return JSON.parse(fs.readFileSync(reportsPath, "utf8"));
@@ -76,8 +198,16 @@ function writeReports(rows) {
   fs.writeFileSync(reportsPath, JSON.stringify(rows, null, 2));
 }
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   const provider = effectiveAvatarProvider();
+  let liveavatarAuth = null;
+  if (LIVEAVATAR_API_KEY) {
+    try {
+      liveavatarAuth = await cachedLiveAvatarAuth(false);
+    } catch {
+      liveavatarAuth = { ok: false, message: "probe_failed" };
+    }
+  }
   res.json({
     ok: true,
     agentConfigured: Boolean(AGENT_ID),
@@ -87,8 +217,17 @@ app.get("/api/health", (_req, res) => {
     heygenReady: heygenConfigured(),
     heygenAvatarIdSet: Boolean(LIVEAVATAR_AVATAR_ID),
     heygenKeySet: Boolean(LIVEAVATAR_API_KEY),
+    liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
+    liveavatarAuthOk: liveavatarAuth ? Boolean(liveavatarAuth.ok) : null,
+    liveavatarAuthMessage: liveavatarAuth?.message || null,
+    liveavatarAuthHint: liveavatarAuth?.hint || null,
+    liveavatarLooksLikeClassicHeygenKey: liveavatarAuth?.heygenClassicLooksValid ?? null,
+    liveavatarSandbox: LIVEAVATAR_SANDBOX,
+    elevenlabsSecretIdSet: Boolean(liveAvatarElSecretId),
     recordingReady: recordingConfigured(),
     supabaseUrlSet: Boolean((process.env.SUPABASE_URL || "").trim()),
+    note:
+      "recordingReady=false does not block Start interview; only Supabase upload is disabled.",
   });
 });
 
@@ -140,8 +279,28 @@ app.get("/api/signed-url", async (_req, res) => {
 async function ensureElevenLabsSecretId() {
   if (liveAvatarElSecretId) return liveAvatarElSecretId;
   if (!LIVEAVATAR_API_KEY || !ELEVEN_KEY) {
-    throw new Error("heygen_missing_elevenlabs_secret_or_key");
+    const err = new Error("heygen_missing_elevenlabs_secret_or_key");
+    err.status = 400;
+    err.detail = {
+      hint: "Set LIVEAVATAR_ELEVENLABS_SECRET_ID (preferred) or ELEVENLABS_API_KEY so the server can register a LiveAvatar secret.",
+    };
+    throw err;
   }
+
+  const auth = await cachedLiveAvatarAuth(true);
+  if (!auth.ok) {
+    const err = new Error("heygen_secret_register_failed");
+    err.status = auth.status || 401;
+    err.detail = {
+      code: auth.code,
+      message: auth.message,
+      keySource: auth.keySource,
+      heygenClassicLooksValid: auth.heygenClassicLooksValid,
+      hint: auth.hint,
+    };
+    throw err;
+  }
+
   const r = await fetch("https://api.liveavatar.com/v1/secrets", {
     method: "POST",
     headers: {
@@ -155,10 +314,10 @@ async function ensureElevenLabsSecretId() {
       secret_name: "Angela ElevenLabs Dispute Hero",
     }),
   });
-  const text = await r.text();
+  const bodyText = await r.text();
   let data;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(bodyText);
   } catch {
     data = null;
   }
@@ -171,10 +330,19 @@ async function ensureElevenLabsSecretId() {
   if (!r.ok || !secretId) {
     const err = new Error("heygen_secret_register_failed");
     err.status = r.status;
-    err.detail = typeof data === "object" ? data : { raw: text.slice(0, 200) };
+    err.detail = {
+      ...(typeof data === "object" && data ? data : { raw: bodyText.slice(0, 200) }),
+      hint:
+        data?.message === "Invalid API key"
+          ? "LiveAvatar API key rejected. Replace LIVEAVATAR_API_KEY with a key from https://app.liveavatar.com/developers (not app.heygen.com)."
+          : "LiveAvatar secret registration failed. If ElevenLabs is free-tier, the Agent Connector requires a paid ElevenLabs plan.",
+    };
     throw err;
   }
   liveAvatarElSecretId = String(secretId);
+  console.log(
+    "Registered LiveAvatar ElevenLabs secret_id (value not logged). Persist LIVEAVATAR_ELEVENLABS_SECRET_ID in Render to skip re-register.",
+  );
   return liveAvatarElSecretId;
 }
 
@@ -182,16 +350,53 @@ async function ensureElevenLabsSecretId() {
  * Mint a LiveAvatar (HeyGen Interactive) session token for LITE + ElevenLabs Agent.
  * Keeps API key on the server; browser only receives session_token.
  */
+app.post("/api/avatar/diagnose", async (req, res) => {
+  const code = String(req.body?.code || req.headers["x-access-code"] || "").trim();
+  if (!code || code !== ACCESS_CODE) {
+    return res.status(401).json({ ok: false, error: "Invalid access code" });
+  }
+  const auth = await cachedLiveAvatarAuth(true);
+  res.json({
+    ok: true,
+    avatar: effectiveAvatarProvider(),
+    heygenConfigured: heygenConfigured(),
+    liveavatarKeySet: Boolean(LIVEAVATAR_API_KEY),
+    liveavatarKeySource: LIVEAVATAR_KEY_SOURCE,
+    liveavatarKeyLength: LIVEAVATAR_API_KEY ? LIVEAVATAR_API_KEY.length : 0,
+    avatarIdSet: Boolean(LIVEAVATAR_AVATAR_ID),
+    avatarIdLength: LIVEAVATAR_AVATAR_ID ? LIVEAVATAR_AVATAR_ID.length : 0,
+    elevenlabsKeySet: Boolean(ELEVEN_KEY),
+    elevenlabsSecretIdSet: Boolean(liveAvatarElSecretId),
+    sandbox: LIVEAVATAR_SANDBOX,
+    auth,
+    recordingReady: recordingConfigured(),
+    note:
+      "recordingReady=false does not block interview start. liveavatarAuthOk must be true before Start interview can mint a session.",
+  });
+});
+
 app.post("/api/avatar/session", async (_req, res) => {
   if (effectiveAvatarProvider() !== "heygen") {
     return res.status(400).json({
       error: "heygen_not_active",
       avatar: effectiveAvatarProvider(),
-      hint: "Set AVATAR_PROVIDER=heygen plus LIVEAVATAR_API_KEY (or HEYGEN_API_KEY), LIVEAVATAR_AVATAR_ID, and LIVEAVATAR_ELEVENLABS_SECRET_ID or ELEVENLABS_API_KEY.",
+      hint: "Set AVATAR_PROVIDER=heygen plus LIVEAVATAR_API_KEY (from app.liveavatar.com/developers — not a classic HeyGen key), LIVEAVATAR_AVATAR_ID, and LIVEAVATAR_ELEVENLABS_SECRET_ID or ELEVENLABS_API_KEY.",
     });
   }
   try {
     const secretId = await ensureElevenLabsSecretId();
+    const payload = {
+      mode: "LITE",
+      avatar_id: LIVEAVATAR_AVATAR_ID,
+      elevenlabs_agent_config: {
+        secret_id: secretId,
+        agent_id: AGENT_ID,
+      },
+    };
+    if (LIVEAVATAR_SANDBOX) {
+      // Sandbox ignores production avatar credit use; sessions ~1 min.
+      payload.is_sandbox = true;
+    }
     const r = await fetch("https://api.liveavatar.com/v1/sessions/token", {
       method: "POST",
       headers: {
@@ -199,19 +404,12 @@ app.post("/api/avatar/session", async (_req, res) => {
         accept: "application/json",
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        mode: "LITE",
-        avatar_id: LIVEAVATAR_AVATAR_ID,
-        elevenlabs_agent_config: {
-          secret_id: secretId,
-          agent_id: AGENT_ID,
-        },
-      }),
+      body: JSON.stringify(payload),
     });
-    const text = await r.text();
+    const bodyText = await r.text();
     let data;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(bodyText);
     } catch {
       data = null;
     }
@@ -222,9 +420,15 @@ app.post("/api/avatar/session", async (_req, res) => {
       null;
     const sessionId = data?.data?.session_id || data?.session_id || null;
     if (!r.ok || !sessionToken) {
+      const msg = data?.message || null;
       return res.status(r.status || 502).json({
         error: "heygen_token_failed",
-        detail: typeof data === "object" ? data : { raw: text.slice(0, 300) },
+        message: msg,
+        detail: typeof data === "object" ? data : { raw: bodyText.slice(0, 300) },
+        hint:
+          msg && /credit/i.test(String(msg))
+            ? "LiveAvatar needs credits to start a session. Free tier includes 10 credits (~10 LITE minutes). Essential is $99/mo for 1,100 credits. Sandbox: set LIVEAVATAR_SANDBOX=true (Wayne avatar only, ~1 min, no credits)."
+            : undefined,
       });
     }
     res.json({
@@ -233,11 +437,19 @@ app.post("/api/avatar/session", async (_req, res) => {
       sessionToken,
       sessionId,
       agentId: AGENT_ID,
+      sandbox: LIVEAVATAR_SANDBOX,
     });
   } catch (err) {
+    const detail = err.detail || undefined;
+    const message =
+      detail?.message ||
+      detail?.hint ||
+      String(err?.message || err);
     res.status(err.status || 500).json({
       error: String(err?.message || err),
-      detail: err.detail || undefined,
+      message,
+      detail,
+      hint: detail?.hint,
     });
   }
 });

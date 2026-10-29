@@ -229,19 +229,57 @@ export default function App() {
     return cam;
   };
 
+  const fetchAvatarSessionWithRetry = async () => {
+    const attempts = 4;
+    let lastErr: unknown = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        if (i > 0) {
+          setStatus(`Waking server… retry ${i + 1}/${attempts}`);
+          await new Promise((r) => setTimeout(r, 1500 * i));
+        }
+        const r = await fetch("/api/avatar/session", { method: "POST" });
+        let data: Record<string, unknown> = {};
+        try {
+          data = await r.json();
+        } catch {
+          data = {};
+        }
+        return { r, data };
+      } catch (e) {
+        // Browser "Failed to fetch" — common on Render free cold starts.
+        lastErr = e;
+      }
+    }
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error("Failed to fetch (server may still be waking — retry in a few seconds)");
+  };
+
   const startHeygenInterview = async () => {
     setError("");
     setStatus("Connecting LiveAvatar…");
     setTranscript([]);
-    const r = await fetch("/api/avatar/session", { method: "POST" });
-    const data = await r.json();
-    if (!r.ok || !data.sessionToken) {
+    const { r, data } = await fetchAvatarSessionWithRetry();
+    const sessionToken =
+      typeof data.sessionToken === "string" ? data.sessionToken : "";
+    if (!r.ok || !sessionToken) {
+      const detail = (data.detail || {}) as Record<string, unknown>;
+      const parts = [
+        data.message,
+        data.error,
+        detail.message,
+        data.hint || detail.hint,
+      ]
+        .map((x) => (typeof x === "string" ? x.trim() : ""))
+        .filter(Boolean);
+      const uniq = [...new Set(parts)];
       throw new Error(
-        data.error || data.hint || "Failed to mint LiveAvatar session",
+        uniq.join(" — ") || "Failed to mint LiveAvatar session",
       );
     }
 
-    const session = new ElevenLabsAgentSession(data.sessionToken, {
+    const session = new ElevenLabsAgentSession(sessionToken, {
       autoKeepAlive: true,
     });
     heygenRef.current = session;
