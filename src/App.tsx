@@ -740,10 +740,17 @@ export default function App() {
     } catch (streamErr) {
       console.warn("Simli audio tap failed", streamErr);
       const detail = String((streamErr as Error)?.message || streamErr);
-      setError(
-        `Could not tap ElevenLabs audio for Simli (${detail}). Agent may be out of credits or mic/audio failed.`,
+      // Do not clobber a more specific ElevenLabs error (e.g. quota_exceeded).
+      setError((prev) =>
+        prev
+          ? prev
+          : `Could not tap ElevenLabs audio for Simli (${detail}). Agent may be out of credits or mic/audio failed.`,
       );
-      setStatus(`Error — ElevenLabs audio unavailable (${detail})`);
+      setStatus((prev) =>
+        prev.startsWith("Error") || prev.startsWith("Simli error")
+          ? prev
+          : `Error — ElevenLabs audio unavailable (${detail})`,
+      );
     }
     window.setTimeout(() => startSideRecorders(), 800);
   };
