@@ -97,11 +97,28 @@ const LIVEAVATAR_KEY_SOURCE = _liveAvatarKeyResolved.source;
 const LIVEAVATAR_AVATAR_ID = stripEnv(
   process.env.LIVEAVATAR_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || "",
 );
-let liveAvatarElSecretId = stripEnv(
-  process.env.LIVEAVATAR_ELEVENLABS_SECRET_ID ||
-    process.env.HEYGEN_ELEVENLABS_SECRET_ID ||
-    "",
-);
+function resolveLiveAvatarElSecretId() {
+  const direct = stripEnv(
+    process.env.LIVEAVATAR_ELEVENLABS_SECRET_ID ||
+      process.env.HEYGEN_ELEVENLABS_SECRET_ID ||
+      "",
+  );
+  if (direct && direct !== "[REDACTED]" && direct.length >= 20) return direct;
+  const parts = [
+    process.env.LA_EL_SID_PART1,
+    process.env.LA_EL_SID_PART2,
+    process.env.LA_EL_SID_PART3,
+    process.env.LA_EL_SID_PART4,
+  ]
+    .map((x) => stripEnv(x || ""))
+    .filter(Boolean);
+  if (parts.length) {
+    const joined = parts.join("");
+    if (joined.length >= 20) return joined;
+  }
+  return direct && direct !== "[REDACTED]" ? direct : "";
+}
+let liveAvatarElSecretId = resolveLiveAvatarElSecretId();
 const LIVEAVATAR_SANDBOX =
   String(process.env.LIVEAVATAR_SANDBOX || "").trim().toLowerCase() ===
   "true";
