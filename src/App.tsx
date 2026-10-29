@@ -138,6 +138,8 @@ export default function App() {
   const candidateRecorderRef = useRef<SideRecorder | null>(null);
   const angelaRecorderRef = useRef<SideRecorder | null>(null);
   const cameraDeniedRef = useRef(false);
+  /** Remembers requested provider across OSS fallback so Sara still shows. */
+  const intendedProviderRef = useRef<AvatarProvider>("talking-avatar-oss");
 
   useEffect(() => {
     return () => {
@@ -174,6 +176,7 @@ export default function App() {
         data.avatarProvider === "talking-avatar-oss" ||
         data.avatarProvider === "simli"
       ) {
+        intendedProviderRef.current = data.avatarProvider;
         setAvatarProvider(data.avatarProvider);
       }
       setStep("consent");
@@ -449,6 +452,17 @@ export default function App() {
     }, 4000);
   };
 
+
+  const surfaceConversationError = (err: unknown, where: string) => {
+    const msg =
+      (err as Error)?.message ||
+      (typeof err === "string" ? err : "") ||
+      "Conversation error";
+    console.error(where, err);
+    setError(msg);
+    setStatus(`Error — ${msg}`);
+  };
+
   const startOssInterview = async () => {
     setError("");
     setStatus("1/3 Waking / fetching signed URL…");
@@ -465,10 +479,13 @@ export default function App() {
     const sessionOptions: Record<string, unknown> = {
       onConnect: () =>
         setStatus("3/3 Connected — waiting for Angela’s opening…"),
-      onDisconnect: () => setStatus("Disconnected"),
+      onDisconnect: () => {
+        setStatus((prev) =>
+          prev.startsWith("Error") ? prev : "Disconnected",
+        );
+      },
       onError: (err: Error) => {
-        console.error(err);
-        setError(err?.message || "Conversation error");
+        surfaceConversationError(err, "OSS Conversation.onError");
       },
       onModeChange: (m: { mode?: string }) => {
         if (m?.mode === "speaking") {
@@ -493,9 +510,16 @@ export default function App() {
       sessionOptions.agentId = sessionCfg.agentId || agentId;
     }
 
-    const conv = await Conversation.startSession(
-      sessionOptions as Parameters<typeof Conversation.startSession>[0],
-    );
+    let conv;
+    try {
+      conv = await Conversation.startSession(
+        sessionOptions as Parameters<typeof Conversation.startSession>[0],
+      );
+    } catch (startErr) {
+      surfaceConversationError(startErr, "OSS Conversation.startSession");
+      setStep("live");
+      return;
+    }
     convRef.current = conv as AwaitableConversation;
     try {
       const id = (conv as { getId?: () => string }).getId?.();
@@ -510,14 +534,13 @@ export default function App() {
     try {
       const stream = await tap.waitForStream();
       streamRef.current = stream;
-      if (avatarMode === "3d") {
-        await attach3dAvatar(stream);
-      } else {
-        attachPortraitAnalyser(stream);
-      }
+      // Candidates never pick 3D vs still — portrait only (Simli fallback uses Sara).
+      attachPortraitAnalyser(stream);
     } catch (streamErr) {
       console.warn("Avatar stream tap failed; voice-only fallback", streamErr);
-      setStatus("Live (voice — avatar stream unavailable)");
+      const detail = String((streamErr as Error)?.message || streamErr);
+      setStatus(`Live (voice only — ${detail})`);
+      setError((prev) => prev || detail);
     }
     window.setTimeout(() => startSideRecorders(), 500);
   };
@@ -532,6 +555,7 @@ export default function App() {
   const startSimliInterview = async () => {
     setError("");
     setTranscript([]);
+    intendedProviderRef.current = "simli";
     setStatus("1/4 Waking server…");
     try {
       await fetch("/api/health", { cache: "no-store" });
@@ -563,9 +587,9 @@ export default function App() {
       }
     } catch (mintErr) {
       console.warn("Simli mint failed — falling back to OSS", mintErr);
-      setError(
-        `Simli unavailable (${(mintErr as Error).message}). Falling back to Talking Avatar OSS.`,
-      );
+      const detail = (mintErr as Error).message || String(mintErr);
+      setError(`Simli unavailable (${detail}). Falling back to still.`);
+      setStatus(`Simli mint failed — ${detail}`);
       setAvatarProvider("talking-avatar-oss");
       await startOssInterview();
       return;
@@ -573,19 +597,27 @@ export default function App() {
 
     setStep("live");
     setStatus("3/4 Starting Simli video…");
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => resolve()),
-    );
-
-    const videoEl = simliVideoRef.current;
-    const audioEl = simliAudioRef.current;
+    // Wait until React mounts <video>/<audio> (one rAF is not enough).
+    let videoEl: HTMLVideoElement | null = null;
+    let audioEl: HTMLAudioElement | null = null;
+    for (let i = 0; i < 40; i++) {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      videoEl = simliVideoRef.current;
+      audioEl = simliAudioRef.current;
+      if (videoEl && audioEl) break;
+    }
     if (!videoEl || !audioEl) {
-      setError("Simli video elements missing — falling back to OSS");
+      const detail = "Simli video elements missing after mount wait";
+      setError(`${detail} — falling back to still`);
+      setStatus(detail);
       setAvatarProvider("talking-avatar-oss");
       await startOssInterview();
       return;
     }
 
+    // Constructor opens signaling — create immediately before start().
     const client = new SimliClient(
       sessionToken,
       videoEl,
@@ -605,16 +637,25 @@ export default function App() {
       setStatus("Listening…");
     });
     client.on("stop", () => setStatus("Simli session ended"));
-    client.on("error", () => {
-      console.warn("SimliClient error event");
+    client.on("error", (detail: string) => {
+      console.warn("SimliClient error event", detail);
+      setError(`Simli error: ${detail || "unknown"}`);
+      setStatus(`Simli error — ${detail || "unknown"}`);
+    });
+    client.on("startup_error", (message: string) => {
+      console.warn("SimliClient startup_error", message);
+      setStatus(`Simli connecting… (${message || "retrying"})`);
     });
 
     try {
-      // Establish media path; silence kick as in Simli ElevenLabs sample
-      const startPromise = client.start();
-      const silence = new Uint8Array(6000).fill(0);
-      client.sendAudioData(silence);
-      await startPromise;
+      // Must await start() before sendAudioData — SDK throws if not connected.
+      await client.start();
+      try {
+        const silence = new Uint8Array(6000).fill(0);
+        client.sendAudioData(silence);
+      } catch (silenceErr) {
+        console.warn("Simli silence kick skipped", silenceErr);
+      }
     } catch (startErr) {
       console.warn("Simli start failed — falling back to OSS", startErr);
       try {
@@ -623,9 +664,9 @@ export default function App() {
         /* ignore */
       }
       simliRef.current = null;
-      setError(
-        `Simli start failed (${String((startErr as Error)?.message || startErr)}). Falling back to OSS.`,
-      );
+      const detail = String((startErr as Error)?.message || startErr);
+      setError(`Simli start failed (${detail}). Falling back to still.`);
+      setStatus(`Simli start failed — ${detail}`);
       setAvatarProvider("talking-avatar-oss");
       await startOssInterview();
       return;
@@ -637,14 +678,25 @@ export default function App() {
     const sessionOptions: Record<string, unknown> = {
       onConnect: () =>
         setStatus("Connected — waiting for Angela’s opening…"),
-      onDisconnect: () => setStatus("Disconnected"),
+      onDisconnect: () => {
+        setStatus((prev) =>
+          prev.startsWith("Error") || prev.startsWith("Simli error")
+            ? prev
+            : "Disconnected",
+        );
+      },
       onError: (err: Error) => {
-        console.error(err);
-        setError(err?.message || "Conversation error");
+        surfaceConversationError(err, "Simli Conversation.onError");
       },
       onModeChange: (m: { mode?: string }) => {
-        if (m?.mode === "speaking") setSpeaking(true);
-        if (m?.mode === "listening") setSpeaking(false);
+        if (m?.mode === "speaking") {
+          setSpeaking(true);
+          setStatus("Angela is speaking…");
+        }
+        if (m?.mode === "listening") {
+          setSpeaking(false);
+          setStatus("Listening…");
+        }
       },
       onMessage: (msg: { source?: string; message?: string }) => {
         if (!msg?.message) return;
@@ -658,15 +710,21 @@ export default function App() {
       sessionOptions.agentId = sessionCfg.agentId || agentId;
     }
 
-    const conv = await Conversation.startSession(
-      sessionOptions as Parameters<typeof Conversation.startSession>[0],
-    );
-    convRef.current = conv as AwaitableConversation;
     try {
-      const id = (conv as { getId?: () => string }).getId?.();
-      if (id) setConversationId(id);
-    } catch {
-      /* optional */
+      const conv = await Conversation.startSession(
+        sessionOptions as Parameters<typeof Conversation.startSession>[0],
+      );
+      convRef.current = conv as AwaitableConversation;
+      try {
+        const id = (conv as { getId?: () => string }).getId?.();
+        if (id) setConversationId(id);
+      } catch {
+        /* optional */
+      }
+    } catch (elErr) {
+      surfaceConversationError(elErr, "Simli Conversation.startSession");
+      // Keep Simli video up so the face stays on screen even if voice failed.
+      return;
     }
 
     try {
@@ -674,16 +732,18 @@ export default function App() {
       streamRef.current = stream;
       const track = stream.getAudioTracks()[0];
       if (track && simliRef.current) {
-        // Official Simli path: resample/play via listenToMediastreamTrack
         simliRef.current.listenToMediastreamTrack(track);
       } else {
         console.warn("No audio track for Simli; voice may be silent on avatar");
+        setStatus("Simli video live — waiting for ElevenLabs audio track…");
       }
     } catch (streamErr) {
       console.warn("Simli audio tap failed", streamErr);
+      const detail = String((streamErr as Error)?.message || streamErr);
       setError(
-        "Could not tap ElevenLabs audio for Simli — check mic permissions / agent.",
+        `Could not tap ElevenLabs audio for Simli (${detail}). Agent may be out of credits or mic/audio failed.`,
       );
+      setStatus(`Error — ElevenLabs audio unavailable (${detail})`);
     }
     window.setTimeout(() => startSideRecorders(), 800);
   };
@@ -693,6 +753,7 @@ export default function App() {
     setInterviewRecordId(null);
     try {
       await prepareCandidateCamera();
+      intendedProviderRef.current = avatarProvider;
       if (avatarProvider === "heygen") {
         await startHeygenInterview();
       } else if (avatarProvider === "simli") {
@@ -963,10 +1024,16 @@ export default function App() {
                   />
                   <audio ref={simliAudioRef} autoPlay playsInline />
                 </>
-              ) : avatarMode === "portrait" ? (
-                <img src={ANGELA_FACE} alt="Angela" className="portrait" />
               ) : (
-                <div ref={avatarMountRef} className="avatar-3d" />
+                <img
+                  src={
+                    intendedProviderRef.current === "simli"
+                      ? SIMLI_SARA
+                      : ANGELA_FACE
+                  }
+                  alt="Angela"
+                  className="portrait"
+                />
               )}
               <div className="avatar-meta">
                 <strong>Angela</strong>
@@ -995,24 +1062,6 @@ export default function App() {
                 <p className="muted">
                   Camera not available — continuing without candidate video.
                 </p>
-              )}
-              {avatarProvider !== "heygen" && avatarProvider !== "simli" && (
-                <div className="mode-toggle">
-                  <button
-                    type="button"
-                    className={avatarMode === "portrait" ? "active" : ""}
-                    onClick={() => void switchAvatarMode("portrait")}
-                  >
-                    Angela look (photoreal still)
-                  </button>
-                  <button
-                    type="button"
-                    className={avatarMode === "3d" ? "active" : ""}
-                    onClick={() => void switchAvatarMode("3d")}
-                  >
-                    3D lip-sync (OSS)
-                  </button>
-                </div>
               )}
               <button
                 type="button"
